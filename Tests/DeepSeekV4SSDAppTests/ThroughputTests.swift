@@ -204,7 +204,57 @@ final class ThroughputTests: XCTestCase {
     #endif
   }
 
+  func testDurationFormattingCarriesAtUnitBoundaries() {
+    let cases: [(Double, String)] = [
+      (0, "0ms"), (0.1, "<1ms"), (0.999, "<1ms"), (1, "1ms"),
+      (12.6, "13ms"), (99, "99ms"), (99.49, "99ms"), (99.5, "0.1s"),
+      (100, "0.1s"), (500, "0.5s"), (1_000, "1s"), (1_234, "1.2s"),
+      (59_000, "59s"), (59_949, "59.9s"), (59_950, "1m"),
+      (60_000, "1m"), (61_000, "1m1s"), (61_500, "1m2s"),
+      (3_599_000, "59m59s"), (3_599_500, "1h"), (3_600_000, "1h"),
+      (3_660_000, "1h1m"), (3_690_000, "1h2m"), (86_340_000, "23h59m"),
+      (86_370_000, "1d"), (86_400_000, "1d"), (90_000_000, "1d1h"),
+      (123_456_789, "1d10h"), (172_800_000, "2d"),
+    ]
+    for (milliseconds, expected) in cases {
+      XCTAssertEqual(ThroughputResult.duration(milliseconds: milliseconds), expected, "\(milliseconds)ms")
+    }
+    for milliseconds: Double? in [nil, -1, .nan, .infinity, -.infinity, .greatestFiniteMagnitude] {
+      XCTAssertEqual(ThroughputResult.duration(milliseconds: milliseconds), "—")
+    }
+  }
+
+  func testTimingCellsAndReadableExportsShareUnitsWithoutChangingJSON() throws {
+    let event = try XCTUnwrap(ThroughputEvent.decode(#"data: {"result":{"model":"test-model","context_tokens":1024,"generation_tokens":128,"generation_limit":128,"ttft_ms":123456789,"tpot_ms":99,"prefill_tps":100,"decode_tps":100,"elapsed_seconds":3660,"throughput_tps":100,"output_token_sha256":"test","prompt_cache_reused_tokens":0,"benchmark_context":"code","corpus_sha256":"test"}}"#))
+    let result = try XCTUnwrap(event.result)
+    XCTAssertEqual(ThroughputResult.columns,
+      ["Input / Output", "TTFT", "TPOT", "PP tok/s", "TG tok/s", "Total", "Throughput", "Peak Memory"])
+    XCTAssertEqual(result.cells, ["1024 / 128", "1d10h", "99ms", "100.0", "100.0", "1h1m", "100.0", "—"])
+    for format in [ThroughputOutputFormat.plainText, .markdown] {
+      let text = try format.render([result])
+      for value in ["1d10h", "99ms", "1h1m"] { XCTAssertTrue(text.contains(value)) }
+      for old in ["TTFT (ms)", "TPOT (ms)", "Total (s)", "123456789"] {
+        XCTAssertFalse(text.contains(old))
+      }
+    }
+    let json = try ThroughputOutputFormat.json.render([result])
+    let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+    XCTAssertEqual(rows[0]["ttft_ms"] as? Double, 123_456_789)
+    XCTAssertEqual(rows[0]["tpot_ms"] as? Double, 99)
+    XCTAssertEqual(rows[0]["elapsed_seconds"] as? Double, 3_660)
+  }
+
   func testBenchmarkLabelsLoadInAllThreeLanguages() {
+    for (language, total, wait) in [
+      (AppLanguage.english, "Total", "Expert wait"),
+      (.traditionalChinese, "總時間", "專家等待時間"),
+      (.simplifiedChinese, "总时间", "专家等待时间"),
+    ] {
+      XCTAssertEqual(L10n.string("Total", language: language), total)
+      XCTAssertEqual(L10n.string("Expert wait", language: language), wait)
+      XCTAssertEqual(L10n.string("TTFT", language: language), language == .english ? "TTFT" : "首 token")
+      XCTAssertEqual(L10n.string("TPOT", language: language), language == .english ? "TPOT" : "每 token")
+    }
     XCTAssertEqual(L10n.string("Peak Memory", language: .english), "Peak Memory")
     XCTAssertEqual(L10n.string("Peak Memory", language: .traditionalChinese), "記憶體峰值")
     XCTAssertEqual(L10n.string("Peak Memory", language: .simplifiedChinese), "内存峰值")
@@ -224,6 +274,9 @@ final class ThroughputTests: XCTestCase {
     XCTAssertEqual(result.generationTokens, 1)
     XCTAssertEqual(result.generationLimit, 128)
     XCTAssertNil(result.tpotMs)
+    XCTAssertEqual(result.cells[1], "0.5s")
+    XCTAssertEqual(result.cells[2], "—")
+    XCTAssertEqual(result.cells[5], "0.6s")
     XCTAssertEqual(result.peakAppMemoryBytes, 1073741824)
     XCTAssertEqual(result.memoryScope, "app")
     XCTAssertEqual(result.cells.last, "1.00 GiB")
@@ -267,7 +320,9 @@ final class ThroughputTests: XCTestCase {
     XCTAssertTrue(plain.contains("qwen-test"))
     XCTAssertTrue(plain.contains("2304"))
     XCTAssertTrue(plain.contains("4096 / 128"))
-    XCTAssertTrue(plain.contains("500.0"))
+    XCTAssertTrue(plain.contains("0.5s"))
+    XCTAssertTrue(plain.contains("0.1s"))
+    XCTAssertTrue(plain.contains("16.5s"))
     XCTAssertFalse(plain.contains("\t"))
     XCTAssertEqual(plain.split(separator: "\n").count, 2)
     let markdown = try ThroughputOutputFormat.markdown.render([result])

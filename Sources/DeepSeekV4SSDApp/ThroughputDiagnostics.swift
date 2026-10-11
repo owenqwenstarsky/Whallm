@@ -23,6 +23,7 @@ struct ThroughputDiagnosticsView: View {
   private func text(_ key: String) -> String { L10n.string(key, language: language) }
   private func value(_ counters: [String: Double]?, _ key: String, scale: Double = 1) -> String {
     guard let number = counters?[key] else { return "—" }
+    if key == "wait_seconds" { return ThroughputResult.duration(milliseconds: number * 1000) }
     return String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), number / scale)
   }
 
@@ -38,7 +39,7 @@ struct ThroughputDiagnosticsView: View {
             Text(text("After first token"))
           }
           counter("Expert payload GiB", key: "bytes_read", scale: 1_073_741_824)
-          counter("Expert wait seconds", key: "wait_seconds")
+          counter("Expert wait", key: "wait_seconds")
           counter("Expert cache hits", key: "hits")
           counter("Expert cache misses", key: "misses")
           counter("Prefill seeded experts", key: "prefill_seeded_experts")

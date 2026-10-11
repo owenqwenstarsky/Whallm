@@ -45,14 +45,41 @@ struct ThroughputResult: Codable, Identifiable, Sendable {
   // Added by the App: the request estimate under the same condition, for comparison.
   var estimatedRequestMemoryBytes: Double? = nil
 
-  static let columns = ["Input / Output", "TTFT (ms)", "TPOT (ms)", "PP tok/s", "TG tok/s", "Total (s)", "Throughput", "Peak Memory"]
+  static let columns = ["Input / Output", "TTFT", "TPOT", "PP tok/s", "TG tok/s", "Total", "Throughput", "Peak Memory"]
 
   var cells: [String] {
-    ["\(contextTokens) / \(generationTokens)", Self.number(ttftMs), Self.number(tpotMs),
-     Self.number(prefillTps), Self.number(decodeTps), Self.number(elapsedSeconds),
+    ["\(contextTokens) / \(generationTokens)", Self.duration(milliseconds: ttftMs), Self.duration(milliseconds: tpotMs),
+     Self.number(prefillTps), Self.number(decodeTps), Self.duration(milliseconds: elapsedSeconds * 1000),
      Self.number(throughputTps), peakAppMemoryBytes.map {
        String(format: "%.2f GiB", locale: Locale(identifier: "en_US_POSIX"), $0 / 1_073_741_824)
      } ?? "—"]
+  }
+
+  // Presentation only: JSON retains the original values and units. Round before
+  // choosing the next unit so values never display as 100ms, 60s or 60m.
+  static func duration(milliseconds: Double?) -> String {
+    guard let milliseconds, milliseconds.isFinite, milliseconds >= 0 else { return "—" }
+    if milliseconds == 0 { return "0ms" }
+    if milliseconds < 1 { return "<1ms" }
+    if milliseconds.rounded() < 100 { return "\(Int(milliseconds.rounded()))ms" }
+
+    let tenths = (milliseconds / 100).rounded() / 10
+    if tenths < 60 {
+      return String(format: tenths == tenths.rounded() ? "%.0fs" : "%.1fs",
+                    locale: Locale(identifier: "en_US_POSIX"), tenths)
+    }
+    let seconds = (milliseconds / 1000).rounded()
+    if seconds < 3600 {
+      let total = Int(seconds)
+      return "\(total / 60)m" + (total % 60 == 0 ? "" : "\(total % 60)s")
+    }
+    let minutes = (milliseconds / 60_000).rounded()
+    if minutes < 1440 {
+      let total = Int(minutes)
+      return "\(total / 60)h" + (total % 60 == 0 ? "" : "\(total % 60)m")
+    }
+    guard let hours = Int(exactly: (milliseconds / 3_600_000).rounded()) else { return "—" }
+    return "\(hours / 24)d" + (hours % 24 == 0 ? "" : "\(hours % 24)h")
   }
 
   private static func number(_ value: Double?) -> String {

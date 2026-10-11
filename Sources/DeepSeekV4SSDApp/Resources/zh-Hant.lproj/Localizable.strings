@@ -472,11 +472,11 @@
 "The server is not ready. Check Logs and try again." = "伺服器尚未就緒，請查看日誌後重試。";
 "Single request results" = "單次請求結果";
 "Input / Output" = "輸入 / 輸出";
-"TTFT (ms)" = "首 token（ms）";
-"TPOT (ms)" = "每 token（ms）";
+"TTFT" = "首 token";
+"TPOT" = "每 token";
 "PP tok/s" = "輸入 tok/s";
 "TG tok/s" = "生成 tok/s";
-"Total (s)" = "總時間（s）";
+"Total" = "總時間";
 "Peak Memory" = "記憶體峰值";
 "TTFT: first token · TPOT: time per output token · PP: input speed · TG: output speed. Throughput counts input + output tokens per second. Peak Memory samples macOS physical footprint about every 10 ms during loading and generation: Whallm + its inference process, or the inference process alone for a standalone server. Brief peaks may be missed; — means unavailable." = "TTFT：首 token 等待時間；TPOT：每個輸出 token 的時間；PP：輸入速度；TG：生成速度。吞吐量為每秒輸入加輸出 token 數。記憶體峰值在載入與生成期間約每 10 毫秒取樣 macOS physical footprint，合計 Whallm 與推論程序；獨立啟動的伺服器僅計推論程序。可能漏掉瞬間峰值；— 表示無法取得。";
 "Output may end early. Loading time is excluded; no extra warm-up is performed." = "模型可能提早結束輸出。時間不含模型載入，測試前不額外預熱。";
@@ -629,7 +629,7 @@
 "Through first token" = "截至第一個 token";
 "After first token" = "第一個 token 之後";
 "Expert payload GiB" = "專家資料量 GiB";
-"Expert wait seconds" = "專家等待秒數";
+"Expert wait" = "專家等待時間";
 "Expert cache hits" = "專家快取命中";
 "Expert cache misses" = "專家快取未命中";
 "Prefill seeded experts" = "Prefill 保留專家數";

@@ -472,11 +472,11 @@
 "The server is not ready. Check Logs and try again." = "The server is not ready. Check Logs and try again.";
 "Single request results" = "Single request results";
 "Input / Output" = "Input / Output";
-"TTFT (ms)" = "TTFT (ms)";
-"TPOT (ms)" = "TPOT (ms)";
+"TTFT" = "TTFT";
+"TPOT" = "TPOT";
 "PP tok/s" = "PP tok/s";
 "TG tok/s" = "TG tok/s";
-"Total (s)" = "Total (s)";
+"Total" = "Total";
 "Peak Memory" = "Peak Memory";
 "TTFT: first token · TPOT: time per output token · PP: input speed · TG: output speed. Throughput counts input + output tokens per second. Peak Memory samples macOS physical footprint about every 10 ms during loading and generation: Whallm + its inference process, or the inference process alone for a standalone server. Brief peaks may be missed; — means unavailable." = "TTFT: first token · TPOT: time per output token · PP: input speed · TG: output speed. Throughput counts input + output tokens per second. Peak Memory samples macOS physical footprint about every 10 ms during loading and generation: Whallm + its inference process, or the inference process alone for a standalone server. Brief peaks may be missed; — means unavailable.";
 "Output may end early. Loading time is excluded; no extra warm-up is performed." = "Output may end early. Loading time is excluded; no extra warm-up is performed.";
@@ -629,7 +629,7 @@
 "Through first token" = "Through first token";
 "After first token" = "After first token";
 "Expert payload GiB" = "Expert payload GiB";
-"Expert wait seconds" = "Expert wait seconds";
+"Expert wait" = "Expert wait";
 "Expert cache hits" = "Expert cache hits";
 "Expert cache misses" = "Expert cache misses";
 "Prefill seeded experts" = "Prefill seeded experts";
