@@ -38,6 +38,9 @@ def _clear_memory_cache() -> None:
 class RuntimeConfig:
     qwen_prefill_read_experts: int = 1
     qwen_prefill_seed_experts: int = 0
+    # Whole-layer Prefill reads only routed experts up to this many prompt tokens;
+    # 0 reads every expert. 512 from the 2026-10-12 M2 Max measurement.
+    qwen_prefill_routed_max_tokens: int = 512
     slots: int = 1_152
     read_workers: int = 4
     prefetch_read_workers: int = 2
@@ -86,8 +89,9 @@ class RuntimeConfig:
     expert_cache_bytes: int | None = None
     mtp_cache_bytes: int | None = None
     dspark_cache_bytes: int | None = None
-    # Opt-in Qwen research candidates; no App defaults change.
-    qwen_pooled_index_cache: bool = False
+    # Same numbers as recomputing every pooled index row per call; the App also
+    # turns it on. The other three remain opt-in research candidates.
+    qwen_pooled_index_cache: bool = True
     qwen_ngram_lookup_optimized: bool = False
     qwen_compile_tensor_ops: bool = False
     qwen_phase_memory: bool = False

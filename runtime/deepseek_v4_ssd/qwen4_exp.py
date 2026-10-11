@@ -397,6 +397,20 @@ def qsa_causal_block_mask(
     return block_ends[None, :] <= queries[:, None]
 
 
+_ROPE_FREQUENCIES: dict[tuple[int, float], mx.array] = {}
+
+
+def _rope_frequencies(rotary_dim: int, theta: float) -> mx.array:
+    # Same ops as computing them per call, evaluated once instead of per layer.
+    key = (rotary_dim, float(theta))
+    frequencies = _ROPE_FREQUENCIES.get(key)
+    if frequencies is None:
+        frequencies = mx.exp(-math.log(theta) * mx.arange(0, rotary_dim, 2) / rotary_dim)
+        mx.eval(frequencies)
+        _ROPE_FREQUENCIES[key] = frequencies
+    return frequencies
+
+
 def _apply_partial_rope(
     value: mx.array,
     positions: mx.array,
@@ -405,12 +419,10 @@ def _apply_partial_rope(
 ) -> mx.array:
     if rotary_dim == 0:
         return value
-    frequencies = mx.exp(
-        -math.log(theta) * mx.arange(0, rotary_dim, 2) / rotary_dim
-    )
-    angles = positions[..., None] * frequencies
-    cosine = mx.concatenate([mx.cos(angles), mx.cos(angles)], axis=-1)
-    sine = mx.concatenate([mx.sin(angles), mx.sin(angles)], axis=-1)
+    angles = positions[..., None] * _rope_frequencies(rotary_dim, theta)
+    cosine, sine = mx.cos(angles), mx.sin(angles)
+    cosine = mx.concatenate([cosine, cosine], axis=-1)
+    sine = mx.concatenate([sine, sine], axis=-1)
     rotary = value[..., :rotary_dim]
     first, second = mx.split(rotary, 2, axis=-1)
     rotated = mx.concatenate([-second, first], axis=-1)
@@ -938,9 +950,14 @@ class SparseMoE(nn.Module):
         self.cache = cache
         self.layer = layer
 
-    def __call__(self, value: mx.array) -> mx.array:
+    def route(self, value: mx.array) -> tuple[mx.array, mx.array]:
+        """Return the router's probabilities and its top-k expert indices."""
         probabilities = mx.softmax(self.gate(value), axis=-1, precise=True)
         indices = mx.argpartition(probabilities, kth=-self.top_k, axis=-1)[..., -self.top_k :]
+        return probabilities, indices
+
+    def __call__(self, value: mx.array) -> mx.array:
+        probabilities, indices = self.route(value)
         scores = mx.take_along_axis(probabilities, indices, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
@@ -992,6 +1009,22 @@ class DecoderLayer(nn.Module):
         allow_packed_gdn: bool = True,
         prefill_boundary: Callable | None = None,
     ) -> mx.array:
+        hidden = self.attend(hidden, input_ids, mask, cache, rope_positions,
+                             allow_packed_gdn=allow_packed_gdn, prefill_boundary=prefill_boundary)
+        return self.feed_forward(hidden, prefill_boundary=prefill_boundary)
+
+    def attend(
+        self,
+        hidden: mx.array,
+        input_ids: mx.array,
+        mask: mx.array | None,
+        cache,
+        rope_positions=None,
+        *,
+        allow_packed_gdn: bool = True,
+        prefill_boundary: Callable | None = None,
+    ) -> mx.array:
+        """PLE and attention half of the layer; it alone advances the layer cache."""
         if self.ple is not None:
             hidden = hidden + self.ple(hidden, input_ids, cache)
         mixed, residual, injection = self.attn_hyper_connection(hidden)
@@ -1007,7 +1040,10 @@ class DecoderLayer(nn.Module):
             result = self.self_attn(mixed, cache, rope_positions)
         if prefill_boundary is not None:
             prefill_boundary("experts_input", result)
-        hidden = self.attn_hyper_connection.inject(residual, result, injection)
+        return self.attn_hyper_connection.inject(residual, result, injection)
+
+    def feed_forward(self, hidden: mx.array, *, prefill_boundary: Callable | None = None) -> mx.array:
+        """MoE half of the layer, applied to the output of ``attend``."""
         mixed, residual, injection = self.mlp_hyper_connection(hidden)
         if prefill_boundary is not None:
             prefill_boundary("experts", mixed, residual, injection)
@@ -1015,6 +1051,11 @@ class DecoderLayer(nn.Module):
         if prefill_boundary is not None:
             prefill_boundary("layer_output", result)
         return self.mlp_hyper_connection.inject(residual, result, injection)
+
+    def expert_routes(self, hidden: mx.array) -> mx.array:
+        """Expert indices that ``feed_forward`` will select for this input."""
+        mixed, _, _ = self.mlp_hyper_connection(hidden)
+        return self.mlp.route(mixed)[1]
 
     def advance_state(self, hidden: mx.array, input_ids: mx.array, cache) -> None:
         """Advance PLE and linear-attention state for these inputs, skipping the MoE."""

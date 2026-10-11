@@ -34,7 +34,8 @@ class QwenOptimizationTests(unittest.TestCase):
         from dataclasses import asdict
         config = RuntimeConfig()
         raw = asdict(config)
-        for name in ("qwen_pooled_index_cache", "qwen_ngram_lookup_optimized", "qwen_compile_tensor_ops", "qwen_phase_memory"):
+        self.assertTrue(raw.pop("qwen_pooled_index_cache"))
+        for name in ("qwen_ngram_lookup_optimized", "qwen_compile_tensor_ops", "qwen_phase_memory"):
             self.assertFalse(raw.pop(name))
         self.assertEqual(raw.pop("qwen_mtp_draft_tokens"), 2)
         self.assertEqual(raw.pop("qwen_mtp_zero_acceptance_limit"), 32)

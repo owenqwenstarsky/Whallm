@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import heapq
+import math
 import os
 import threading
 import time
@@ -381,7 +382,10 @@ def _staged_slot_regions(
 class _SlotPool:
     """Keep each expert slot in a directly writable Metal buffer."""
 
-    def __init__(self, model: InstalledModel, slots: int) -> None:
+    # Nonzero when each slot can take one cache-bypassing read of whole blocks.
+    _alignment = 0
+
+    def __init__(self, model: InstalledModel, slots: int, direct_alignment: int = 0) -> None:
         self._model = model
         self._source_regions = {
             region.name: region for region in model.expert_regions
@@ -392,9 +396,26 @@ class _SlotPool:
             self._regions, self._layout.batched_regions,
             model.expert_blob_size, model.expert_count,
         )
+        blob = model.expert_blob_size
+        # Only a slot laid out as the file's blob can take the file's bytes in one read.
+        same_layout = all(
+            self._regions[region.name].offset == region.offset
+            for region in model.expert_regions
+        )
+        self._slot_bytes = blob
+        if direct_alignment > 0 and same_layout and blob % direct_alignment:
+            # Expert e starts (e * blob) % alignment bytes into its first block.
+            # A slot holds the widest block range; the weights sit at that shift.
+            granule = math.gcd(blob, direct_alignment)
+            self._alignment = direct_alignment
+            self._slot_bytes = (
+                (direct_alignment - granule + blob + direct_alignment - 1)
+                // direct_alignment * direct_alignment
+            )
         self._slots: list[mx.array | None] = [None] * slots
         self._views: list[memoryview | None] = [None] * slots
-        self._slot_weights: list[object | None] = [None] * slots
+        self._slot_weights: list[dict[int, object] | None] = [None] * slots
+        self._shifts = [0] * slots
         self._loaded = bytearray(slots)
 
     def resize(self, slots: int) -> None:
@@ -404,18 +425,39 @@ class _SlotPool:
             del self._views[slots:]
             del self._slot_weights[slots:]
             del self._slots[slots:]
+            del self._shifts[slots:]
             del self._loaded[slots:]
         elif slots > previous:
             self._slots.extend([None] * (slots - previous))
             self._views.extend([None] * (slots - previous))
             self._slot_weights.extend([None] * (slots - previous))
+            self._shifts.extend([0] * (slots - previous))
             self._loaded.extend(bytes(slots - previous))
+
+    def aligned_read(self, expert: int) -> tuple[int, int, int] | None:
+        """File offset, in-slot shift and length of one whole-block expert read."""
+        if not self._alignment:
+            return None
+        start = expert * self._model.expert_blob_size
+        shift = start % self._alignment
+        length = -(-(shift + self._model.expert_blob_size) // self._alignment) * self._alignment
+        return start - shift, shift, length
+
+    def read_target(self, slot: int, shift: int, length: int) -> memoryview:
+        """Whole-block destination; the slot's weights start ``shift`` bytes in."""
+        view = self._views[slot]
+        if view is None:
+            raise RuntimeError("expert slot buffer is not prepared")
+        if length > self._slot_bytes:
+            raise ValueError("aligned expert read exceeds the slot")
+        self._shifts[slot] = shift
+        return view[:length]
 
     def prepare(self, slots: list[int]) -> None:
         created = []
         for slot in slots:
             if self._slots[slot] is None:
-                array = mx.empty((self._model.expert_blob_size,), dtype=mx.uint8)
+                array = mx.empty((self._slot_bytes,), dtype=mx.uint8)
                 self._slots[slot] = array
                 created.append(array)
         if created:
@@ -432,15 +474,21 @@ class _SlotPool:
             if not self._loaded[slot] or array is None:
                 raise RuntimeError("expert slot is empty")
             # The region views share the slot's buffer, so they follow every
-            # later read into this slot and are built once per slot.
-            if self._slot_weights[slot] is None:
-                self._slot_weights[slot] = self._layout.individual([array], self._array)[0]
-            weights.append(self._slot_weights[slot])
+            # later read into this slot and are built once per slot and shift.
+            shift = self._shifts[slot]
+            views = self._slot_weights[slot]
+            if views is None:
+                views = self._slot_weights[slot] = {}
+            if shift not in views:
+                views[shift] = self._layout.individual(
+                    [array], lambda packed, name: self._array(packed, name, shift))[0]
+            weights.append(views[shift])
         return tuple(weights)
 
-    def _array(self, packed: mx.array, name: str) -> mx.array:
+    def _array(self, packed: mx.array, name: str, shift: int = 0) -> mx.array:
         region = self._regions[name]
-        value = packed[region.offset : region.offset + region.length]
+        offset = region.offset + shift
+        value = packed[offset : offset + region.length]
         if region.dtype == "U32":
             return value.view(mx.uint32).reshape(region.shape)
         value = value.reshape(region.shape)
@@ -467,7 +515,9 @@ class _SlotPool:
         view = self._views[slot]
         if view is None:
             raise RuntimeError("expert slot buffer is not prepared")
-        return view[region.offset : region.offset + region.length]
+        # Follow the slot's current shift, as its weight views do.
+        offset = region.offset + self._shifts[slot]
+        return view[offset : offset + region.length]
 
     def write_views(self, buffer: memoryview, slot: int) -> list[memoryview]:
         base = slot * self._model.expert_blob_size
@@ -758,11 +808,7 @@ class ExpertCache:
                               if eviction_policy == "route" else None)
         self._route_phase = "decode"
         self.metrics = CacheMetrics()
-        self._pool = (
-            _StagedSlotPool(installed_model, slots)
-            if staged_expert_streaming
-            else _SlotPool(installed_model, slots)
-        )
+        self._pool = self._new_pool(slots)
         self._entries: dict[tuple[int, int], _Entry] = {}
         self._free_slots = list(reversed(range(slots)))
         self._heap: list[tuple[int, int, int, int, int]] = []
@@ -799,6 +845,7 @@ class ExpertCache:
         else:
             self._route_trace = None
         self._descriptors: list[int] = []
+        self._layer_file_sizes: list[int] = []
         self._prefill_reader = None
         try:
             for layer in range(self.layer_count):
@@ -811,6 +858,7 @@ class ExpertCache:
                         descriptor,
                         self.file_cache_policy,
                     )
+                    self._layer_file_sizes.append(os.fstat(descriptor).st_size)
                 except Exception:
                     os.close(descriptor)
                     raise
@@ -831,6 +879,12 @@ class ExpertCache:
                     cancel_futures=True,
                 )
             raise
+
+    def _new_pool(self, slots: int) -> _SlotPool:
+        if self.staged_expert_streaming:
+            return _StagedSlotPool(self.model, slots)
+        # Cache-bypassing reads need whole blocks; cached reads keep the plain blob slot.
+        return _SlotPool(self.model, slots, self.direct_io_alignment)
 
     def close(self) -> None:
         for job in self._prefetched_layers.values():
@@ -872,7 +926,7 @@ class ExpertCache:
         mx.synchronize()
         with self._lock:
             # Preserve the direct or staged storage layout.
-            self._pool = type(self._pool)(self.model, self.slots)
+            self._pool = self._new_pool(self.slots)
             self._entries.clear()
             self._seeded_keys.clear()
             self._prefill_seed_routes = None
@@ -1981,15 +2035,21 @@ class ExpertCache:
         slot: int,
     ) -> _SpeculativeRead:
         started = time.perf_counter()
-        views = [
-            pool.writable_region(slot, region.name)
-            for region in self.model.expert_regions
-        ]
-        page_cache = self._pread_views(
-            layer,
-            views,
-            expert * self.model.expert_blob_size,
-        )
+        plan = pool.aligned_read(expert)
+        if plan is not None and plan[0] + plan[2] <= self._layer_file_sizes[layer]:
+            # One read of whole blocks straight into the slot; no staging copy.
+            offset, shift, length = plan
+            page_cache = self._pread_views(layer, [pool.read_target(slot, shift, length)], offset)
+        else:
+            views = [
+                pool.writable_region(slot, region.name)
+                for region in self.model.expert_regions
+            ]
+            page_cache = self._pread_views(
+                layer,
+                views,
+                expert * self.model.expert_blob_size,
+            )
         finished = time.perf_counter()
         if self._route_policy is not None:
             with self._lock:

@@ -7,6 +7,7 @@ import argparse
 DEFAULTS = {
     "qwen_prefill_read_experts": 1,
     "qwen_prefill_seed_experts": 0,
+    "qwen_prefill_routed_max_tokens": 512,
     "qwen_packed_gdn_prefill": False,
     "qwen_sorted_expert_prefill": False,
     "qwen_expert_wave_slots": 0,
@@ -43,6 +44,10 @@ def validate_flash_config(config) -> None:
                 or not getattr(config, "batched_expert_prefill", True)
                 or getattr(config, "qwen_expert_wave_slots", 0)):
             raise ValueError("Qwen prefill read/seed experiments require whole-layer prefill without waves")
+    # Applies only where whole-layer Prefill runs; other Prefill paths ignore it.
+    routed = getattr(config, "qwen_prefill_routed_max_tokens", 512)
+    if type(routed) is not int or not 0 <= routed <= 262_144:
+        raise ValueError("qwen_prefill_routed_max_tokens must be an integer from 0 through 262144")
     for name, maximum in (("qwen_expert_wave_slots", 512),
                           ("qwen_ngram_cache_bytes", 512 * 1024**2)):
         value = getattr(config, name, DEFAULTS[name])
@@ -87,6 +92,9 @@ def add_flash_arguments(parser: argparse.ArgumentParser) -> None:
                         help="1..32 consecutive experts per prefill read; 1 keeps old I/O")
     parser.add_argument("--qwen-prefill-seed-experts", type=int, default=0,
                         help="0..128 hot prompt-tail experts per layer retained in existing decode slots")
+    parser.add_argument("--qwen-prefill-routed-max-tokens", type=int, default=512,
+                        help="whole-layer prefill reads only routed experts up to this many prompt "
+                        "tokens; 0 reads every expert; same output")
     parser.add_argument("--qwen-expert-wave-slots", type=int, default=0,
                         help="experimental exact expert waves; 1..512 experts per wave, 0 disables")
     parser.add_argument("--qwen-ngram-io", choices=("mmap", "pread"), default="mmap",

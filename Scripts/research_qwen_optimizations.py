@@ -41,9 +41,11 @@ def main():
 
     root = Path(__file__).resolve().parents[1]
     sha = lambda data: hashlib.sha256(data).hexdigest()
+    # The runtime default turned pooled rows on; these recorded variants had them off.
     config = RuntimeConfig(expert_cache_bytes=int(7.5 * 1024**3), memory_limit_gib=40,
         prompt_cache_entries=0, persistent_prompt_cache=False, layer_major_prefill=False,
-        batched_expert_prefill=False, ready_expert_decode=False, ane_prefill=False)
+        batched_expert_prefill=False, ready_expert_decode=False, ane_prefill=False,
+        qwen_pooled_index_cache=False)
     overrides = {
         "qsa-chunk16": {"qwen_qsa_query_chunk": 16},
         "qsa-chunk32": {"qwen_qsa_query_chunk": 32},

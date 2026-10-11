@@ -23,7 +23,10 @@ was tested. Installed model bytes, quantization, routing and sampling are unchan
 The whole-layer path requests 48 * 512 * 2,611,200 bytes, about **59.77 GiB**
 of logical expert payload per complete prompt pass. It already loads each layer
 once across token chunks; larger token chunks do not divide these bytes again.
-Logical payload is not physical SSD traffic. Existing phase memory, next-layer
+Logical payload is not physical SSD traffic. Since 2026-10-12, prompts of up to
+`qwen_prefill_routed_max_tokens` (default 512) tokens read only the experts the
+prompt routes to, with the same output; longer prompts read whole layers as
+above. Existing phase memory, next-layer
 prefetch, ready reads, eviction policies, MXFP4 and MTP are not new inventions.
 
 For illustration only, doubling attention that occupies 10% of runtime gives

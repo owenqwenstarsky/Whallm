@@ -48,6 +48,7 @@ class QwenSupport(ModelSupport):
             getattr(config, "qwen_next_layer_prefetch", False),
             (getattr(config, "batched_expert_prefill", True)
              and not getattr(config, "qwen_expert_wave_slots", 0)),
+            routed_max_tokens=getattr(config, "qwen_prefill_routed_max_tokens", 512),
         )
 
     def validate_media_runtime(self, runtime):
@@ -252,8 +253,14 @@ def _qwen_layer_major_prefill(
     expert_cache: Any,
     next_layer_prefetch: bool = False,
     batched_expert_prefill: bool = True,
+    routed_max_tokens: int = 0,
 ) -> mx.array | None:
-    """Populate Qwen caches layer-major, using whole layers or bounded pair waves."""
+    """Populate Qwen caches layer-major, using whole layers or bounded pair waves.
+
+    Up to ``routed_max_tokens`` prompt tokens, each layer runs every chunk's
+    attention half first and reads only the experts the prompt routes to.
+    Chunks, their order and the arithmetic stay the same as whole-layer reads.
+    """
     if not token_ids:
         return None
     sync_enabled = _prefill_sync_enabled()
@@ -263,6 +270,11 @@ def _qwen_layer_major_prefill(
     core = model.model
     if len(prompt_cache) != len(core.layers):
         raise ValueError("prompt cache does not match the Qwen model layers")
+    # The sync diagnostic instruments the whole-layer loop below; keep it there.
+    routed = bool(batched_expert_prefill and not sync_enabled
+                  and 0 < len(token_ids) <= routed_max_tokens)
+    if routed:
+        return _qwen_routed_layer_major_prefill(model, token_ids, prompt_cache, step_size, expert_cache)
     release_slots = getattr(expert_cache, "release_prefill_slots", None)
     if batched_expert_prefill and callable(release_slots):
         release_slots()
@@ -329,3 +341,78 @@ def _qwen_layer_major_prefill(
                           f"layers={len(core.layers)} tokens={len(token_ids)}",
                           file=sys.stderr, flush=True)
                 return hidden
+
+
+def _qwen_routed_layer_major_prefill(
+    model: Any,
+    token_ids: list[int],
+    prompt_cache: Any,
+    step_size: int,
+    expert_cache: Any,
+) -> mx.array:
+    """Whole-layer Prefill that reads only the experts this prompt routes to.
+
+    Attention never depends on the same layer's MoE output, so every chunk's
+    attention half runs first. The router then runs on those outputs, the union
+    of selected experts is read into the layer buffer, and the MoE halves run on
+    the same chunks. Unread experts are never indexed by gather_qmm. Next-layer
+    prefetch is not possible here: that layer's routes are not known yet.
+    """
+    import numpy as np
+    from contextlib import nullcontext
+    core = model.model
+    release_slots = getattr(expert_cache, "release_prefill_slots", None)
+    if callable(release_slots):
+        release_slots()
+    reuse = getattr(expert_cache, "reuse_layer_buffers", nullcontext)
+    with reuse():
+        record_compute_submit = getattr(expert_cache, "record_compute_submit", None)
+        inputs = mx.array(token_ids)[None]
+        hidden = mx.tile(core.embed_tokens(inputs), (1, 1, core.args.hc_count))
+        spans = [(start, min(start + step_size, len(token_ids)))
+                 for start in range(0, len(token_ids), step_size)]
+        for layer_index, (layer, layer_cache) in enumerate(zip(core.layers, prompt_cache)):
+            check_cancelled()
+            attended = []
+            for start, end in spans:
+                check_cancelled()
+                chunk = hidden[:, start:end]
+                mask = (
+                    create_ssm_mask(chunk[..., : core.args.hidden_size], layer_cache)
+                    if layer.layer_type == "linear_attention"
+                    else None
+                )
+                try:
+                    output = layer.attend(chunk, inputs[:, start:end], mask, layer_cache)
+                    eval_prompt_cache([layer_cache], output)
+                except GenerationCancelled:
+                    raise
+                except Exception as error:
+                    error.add_note(f"Qwen routed prefill attention: layer={layer_index} (0-based) "
+                                   f"token_range=[{start},{end}) step_size={step_size}")
+                    raise
+                attended.append(output)
+            routes = [layer.expert_routes(value) for value in attended]
+            mx.eval(*routes)
+            experts = np.unique(np.concatenate([np.asarray(route).reshape(-1) for route in routes]))
+            outputs = []
+            with expert_cache.batched_layer(layer_index, experts=tuple(experts.tolist())):
+                for (start, end), value in zip(spans, attended):
+                    check_cancelled()
+                    try:
+                        output = layer.feed_forward(value)
+                        if callable(record_compute_submit):
+                            record_compute_submit(layer_index)
+                        mx.eval(output)
+                    except GenerationCancelled:
+                        raise
+                    except Exception as error:
+                        error.add_note(f"Qwen routed prefill experts: layer={layer_index} (0-based) "
+                                       f"token_range=[{start},{end}) experts={len(experts)} "
+                                       f"step_size={step_size}")
+                        raise
+                    outputs.append(output)
+            del attended, routes
+            hidden = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=1)
+            mx.eval(hidden)
+        return hidden
