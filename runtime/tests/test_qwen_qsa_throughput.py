@@ -80,6 +80,24 @@ class QSAThroughputTests(unittest.TestCase):
                     mx.eval(expected, actual)
                     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=2e-5, atol=2e-5)
 
+    def test_masked_prefill_uses_gathered_path_above_key_limit(self):
+        from deepseek_v4_ssd import qwen4_exp
+        attn = QSAAttention(tiny_args(indexer_budget=16))
+        attn.masked_prefill = True
+        mx.random.seed(1009)
+        with patch.object(qwen4_exp, "MASKED_PREFILL_MAX_KEYS", 48):
+            for key_length, masked in ((48, True), (49, False), (64, False)):
+                with self.subTest(key_length=key_length):
+                    q = mx.random.normal((1, 4, 16, 32))
+                    k = mx.random.normal((1, 2, key_length, 32))
+                    v = mx.random.normal((1, 2, key_length, 32))
+                    iq = mx.random.normal((1, 16, 2, 32))
+                    raw = mx.random.normal((1, key_length, 32))
+                    with patch.object(attn, "_masked_attention", wraps=attn._masked_attention) as spy:
+                        mx.eval(attn._bounded_attention(q, k, v, iq, raw, key_length - 16))
+                    self.assertEqual(spy.called, masked)
+        self.assertEqual(qwen4_exp.MASKED_PREFILL_MAX_KEYS, 65_536)
+
     def test_masked_prefill_config_and_cache_contract(self):
         from deepseek_v4_ssd.generation import _prompt_cache_contract
         from deepseek_v4_ssd.qwen_flash_config import validate_flash_config
@@ -91,6 +109,8 @@ class QSAThroughputTests(unittest.TestCase):
         on = _prompt_cache_contract(installed, RuntimeConfig(qwen_qsa_masked_prefill=True))
         self.assertNotIn("qwenQSAMaskedPrefill", off)
         self.assertNotEqual(off, on)
+        # Caches written before the 65536-key limit used masks at every length.
+        self.assertEqual(on["qwenQSAMaskedPrefill"], "sdpa-v2-max65536")
 
     def test_runtime_catalog_legacy_fields_and_qwen_only(self):
         from deepseek_v4_ssd.model_support import get_support

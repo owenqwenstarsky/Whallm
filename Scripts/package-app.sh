@@ -9,6 +9,20 @@ zip_path=$output_root/Whallm-macOS-arm64.zip
 app_version=${APP_VERSION:-1.0.0}
 build_version=${BUILD_VERSION:-$app_version}
 build_flavor=${WHALLM_BUILD_FLAVOR:-distribution}
+prefill_sync=${WHALLM_QWEN_PREFILL_SYNC:-0}
+masked_off=${WHALLM_QWEN_QSA_MASKED_PREFILL_OFF:-0}
+if [[ $prefill_sync != 0 && $prefill_sync != 1 ]]; then
+  print -u2 "WHALLM_QWEN_PREFILL_SYNC must be 0 or 1."
+  exit 1
+fi
+if [[ $masked_off != 0 && $masked_off != 1 ]]; then
+  print -u2 "WHALLM_QWEN_QSA_MASKED_PREFILL_OFF must be 0 or 1."
+  exit 1
+fi
+if [[ ( $prefill_sync == 1 || $masked_off == 1 ) && $build_flavor != local ]]; then
+  print -u2 "Qwen prefill sync diagnostics may only be packaged in a local build."
+  exit 1
+fi
 swift_build_arguments=(--package-path "$project_root" -c release)
 # Swift 6.4's Clang link command forwards --sysroot but can omit -isysroot,
 # recording the deployment target as the SDK and selecting legacy AppKit controls.
@@ -105,6 +119,17 @@ ditto "$project_root/Native/ANEBridge/LICENSE" \
   "$app_path/Contents/Resources/ANEBridge-LICENSE"
 ditto "$resource_bundle" "$app_path/Contents/Resources/${resource_bundle:t}"
 ditto "$project_root/runtime" "$app_path/Contents/Resources/runtime"
+# Package-local opt-in: Finder launches need no saved setting or shell environment.
+# Always remove an inherited marker so ordinary/distribution packages stay off.
+prefill_sync_marker=$app_path/Contents/Resources/runtime/deepseek_v4_ssd/model_support/qwen-prefill-sync.enabled
+masked_off_marker=$app_path/Contents/Resources/runtime/deepseek_v4_ssd/model_support/qwen-qsa-masked-off.enabled
+rm -f "$prefill_sync_marker" "$masked_off_marker"
+if [[ $prefill_sync == 1 ]]; then
+  print 'Diagnostic only: extra GPU waits change prefill scheduling.' > "$prefill_sync_marker"
+fi
+if [[ $masked_off == 1 ]]; then
+  print 'Diagnostic only: masked QSA prefill is off.' > "$masked_off_marker"
+fi
 model_packages=$project_root/Sources/DeepSeekRepack/Resources/ModelPackages.json
 ditto "$model_packages" "$app_path/Contents/Resources/ModelPackages.json"
 ditto "$model_packages" "$app_path/Contents/Resources/runtime/deepseek_v4_ssd/model_support/ModelPackages.json"

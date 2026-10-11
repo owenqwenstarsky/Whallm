@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -57,6 +58,13 @@ RESPONSE_HEARTBEAT_SECONDS = 10.0
 CHAT_HEARTBEAT_SECONDS = 10.0
 MAX_REQUEST_BYTES = 1_048_576
 MAX_GENERATION_TOKENS = 272_000
+
+
+def _log_error(context: str, error: Exception) -> None:
+    sys.stderr.write(f"{context}: {error}\n")
+    # Preserve notes and chained failures without capturing locals or dumping requests.
+    traceback.print_exception(error, file=sys.stderr)
+    sys.stderr.flush()
 
 
 class APIError(Exception):
@@ -422,7 +430,7 @@ class OpenAIHandler(BaseHTTPRequestHandler):
                 ).body(),
             )
         except ModelLoadFailed as error:
-            sys.stderr.write(f"model load failed for {error.model}: {error.cause}\n")
+            _log_error(f"model load failed for {error.model}", error.cause)
             self._json(
                 500,
                 APIError(
@@ -436,7 +444,7 @@ class OpenAIHandler(BaseHTTPRequestHandler):
         except (GenerationCancelled, BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as error:
-            sys.stderr.write(f"request failed: {error}\n")
+            _log_error("request failed", error)
             if self.close_connection:
                 return
             self._json(
@@ -916,7 +924,7 @@ class OpenAIHandler(BaseHTTPRequestHandler):
             except (GenerationCancelled, BrokenPipeError, ConnectionResetError):
                 raise
             except Exception as error:
-                sys.stderr.write(f"response {request_id} failed: {error}\n")
+                _log_error(f"response {request_id} failed", error)
                 failed = {**created, "status": "failed", "error": {
                     "code": error.code if isinstance(error, APIError) and error.code else "server_error",
                     "message": str(error) if isinstance(error, APIError) else "Generation failed. Check the server log.",
@@ -1327,7 +1335,7 @@ class OpenAIHandler(BaseHTTPRequestHandler):
                 except (GenerationCancelled, BrokenPipeError, ConnectionResetError):
                     raise
                 except Exception as error:
-                    sys.stderr.write(f"chat {request_id} failed: {error}\n")
+                    _log_error(f"chat {request_id} failed", error)
                     failure = error if isinstance(error, APIError) else APIError(
                         "Generation failed. Check the server log.",
                         status=500, code="server_error", error_type="server_error",

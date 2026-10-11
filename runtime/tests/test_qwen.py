@@ -1336,6 +1336,47 @@ class QwenTests(unittest.TestCase):
             ],
         )
 
+    def test_qwen_prefill_failure_identifies_layer_and_chunk_and_releases_scope(self):
+        for failure_point in ('construct', 'evaluate'):
+            with self.subTest(failure_point=failure_point):
+                failure = RuntimeError('injected GPU failure')
+                calls, evaluations, released = [], [], []
+
+                class Layer:
+                    layer_type = 'full_attention'
+                    def __call__(self, hidden, *_):
+                        calls.append(True)
+                        if failure_point == 'construct' and len(calls) == 5:
+                            raise failure
+                        return hidden + 1
+
+                class Cache:
+                    @contextmanager
+                    def batched_layer(self, layer):
+                        try:
+                            yield
+                        finally:
+                            released.append(layer)
+
+                def evaluate(*_):
+                    evaluations.append(True)
+                    if failure_point == 'evaluate' and len(evaluations) == 5:
+                        raise failure
+
+                core = SimpleNamespace(args=SimpleNamespace(hc_count=1),
+                    layers=[Layer(), Layer()],
+                    embed_tokens=lambda tokens: tokens[..., None].astype(mx.float32))
+                with patch('deepseek_v4_ssd.model_support.qwen.eval_prompt_cache', side_effect=evaluate):
+                    with self.assertRaises(RuntimeError) as caught:
+                        _qwen_layer_major_prefill(SimpleNamespace(model=core), [1, 2, 3, 4, 5],
+                                                  [None, None], 2, Cache())
+                self.assertIs(caught.exception, failure)
+                notes = '\n'.join(getattr(failure, '__notes__', []))
+                self.assertIn('layer=1', notes)
+                self.assertIn('token_range=[2,4)', notes)
+                self.assertIn('step_size=2', notes)
+                self.assertEqual(released, [0, 1])
+
     def test_qwen_prefill_cancellation_exits_expert_scope_before_next_chunk(self):
         cancelled = threading.Event()
         calls = []

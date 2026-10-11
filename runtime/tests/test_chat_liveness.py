@@ -7,6 +7,8 @@ import struct
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -209,6 +211,40 @@ class ChatLivenessTests(unittest.TestCase):
                     self.assertFalse(any(choice.get('finish_reason') for event in events for choice in event.get('choices', [])))
                     self.assertTrue(self.manager._generation_lock.acquire(timeout=1))
                     self.manager._generation_lock.release()
+
+    def test_generation_failure_logs_traceback_and_notes_without_request_contents(self):
+        def broken(prompt, options):
+            error = RuntimeError('[METAL] kIOGPUCommandBufferCallbackErrorImpactingInteractivity')
+            error.add_note('generation: prompt_tokens=121221 generated_tokens=0 prefill_step_size=1024')
+            raise error
+            yield
+
+        self.runtime.stream = broken
+        secret = 'private-request-content-not-for-logs'
+        self.server.api_key = 'test-credential-not-for-logs'
+        for endpoint in ('chat/completions', 'responses', 'completions'):
+            for streaming in (False, True):
+                with self.subTest(endpoint=endpoint, streaming=streaming):
+                    payload = {'model': self.model_id, 'stream': streaming, 'max_tokens': 1}
+                    if endpoint == 'chat/completions':
+                        payload['messages'] = [{'role': 'user', 'content': secret}]
+                    else:
+                        payload['input' if endpoint == 'responses' else 'prompt'] = secret
+                    log = StringIO()
+                    with redirect_stderr(log):
+                        self.connection.request('POST', '/v1/' + endpoint, json.dumps(payload),
+                            {'Content-Type': 'application/json',
+                             'Authorization': 'Bearer ' + self.server.api_key})
+                        response = self.connection.getresponse()
+                        body = response.read().decode()
+                    self.assertEqual(response.status, 200 if streaming else 500)
+                    self.assertIn('Traceback (most recent call last)', log.getvalue())
+                    self.assertIn('in broken', log.getvalue())
+                    self.assertIn('prompt_tokens=121221', log.getvalue())
+                    self.assertNotIn(secret, log.getvalue())
+                    self.assertNotIn(self.server.api_key, log.getvalue())
+                    self.assertNotIn('Traceback', body)
+                    self.assertNotIn('prefill_step_size=1024', body)
 
     def test_error_after_partial_output_is_not_reported_as_success(self):
         def stream(prompt, options):

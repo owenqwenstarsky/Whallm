@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import os
+from pathlib import Path
+import sys
+import time
 from typing import Any
 import mlx.core as mx
 from mlx_lm.models.base import create_ssm_mask
 from ..model import eval_prompt_cache
-from ..cancellation import check_cancelled
+from ..cancellation import GenerationCancelled, check_cancelled
 from ..expert_layout import GateUpMXFP4Layout
 from .base import ModelSupport
 
@@ -188,6 +193,57 @@ def _qwen_contract(raw: dict, descriptor) -> dict:
     }
 
 
+_PREFILL_SYNC_MARKER = Path(__file__).with_name("qwen-prefill-sync.enabled")
+
+
+def _prefill_sync_enabled() -> bool:
+    flag = os.environ.get("WHALLM_QWEN_PREFILL_SYNC")
+    return _PREFILL_SYNC_MARKER.is_file() if flag is None else flag == "1"
+
+
+_MASKED_PREFILL_OFF_MARKER = Path(__file__).with_name("qwen-qsa-masked-off.enabled")
+
+
+def _masked_prefill_off_enabled() -> bool:
+    flag = os.environ.get("WHALLM_QWEN_QSA_MASKED_PREFILL_OFF")
+    return _MASKED_PREFILL_OFF_MARKER.is_file() if flag is None else flag == "1"
+
+
+def masked_prefill_override(config):
+    """Diagnostic only: run QSA Prefill on the gathered path despite App tuning."""
+    if not getattr(config, "qwen_qsa_masked_prefill", False) or not _masked_prefill_off_enabled():
+        return config
+    print("[DEBUG-qwen-qsa-masked-off] masked QSA prefill disabled for this runtime",
+          file=sys.stderr, flush=True)
+    return replace(config, qwen_qsa_masked_prefill=False)
+
+
+class _PrefillSync:
+    """Finish the current stage before constructing the next; diagnostic only."""
+
+    def __init__(self, cache):
+        self.cache = cache
+        self.stage = "layer_input"
+        self.last_completed = "none"
+        self.started = time.perf_counter()
+
+    def __call__(self, next_stage, *arrays):
+        check_cancelled()
+        eval_prompt_cache([self.cache], *arrays)
+        mx.synchronize()
+        check_cancelled()
+        self.last_completed, self.stage = self.stage, next_stage
+        self.started = time.perf_counter()
+
+    def failure_note(self):
+        return (
+            f"[DEBUG-qwen-prefill-sync] stage={self.stage} "
+            f"last_completed={self.last_completed} "
+            f"stage_seconds={time.perf_counter() - self.started:.6f}; "
+            "extra waits change scheduling; this is not a GPU-kernel attribution"
+        )
+
+
 def _qwen_layer_major_prefill(
     model: Any,
     token_ids: list[int],
@@ -200,6 +256,10 @@ def _qwen_layer_major_prefill(
     """Populate Qwen caches layer-major, using whole layers or bounded pair waves."""
     if not token_ids:
         return None
+    sync_enabled = _prefill_sync_enabled()
+    if sync_enabled:
+        print("[DEBUG-qwen-prefill-sync] enabled; extra GPU waits; "
+              f"tokens={len(token_ids)} step_size={step_size}", file=sys.stderr, flush=True)
     core = model.model
     if len(prompt_cache) != len(core.layers):
         raise ValueError("prompt cache does not match the Qwen model layers")
@@ -229,18 +289,43 @@ def _qwen_layer_major_prefill(
                         if layer.layer_type == "linear_attention"
                         else None
                     )
-                    output = layer(chunk, chunk_ids, mask, layer_cache)
-                    if (
-                        batched_expert_prefill and next_layer_prefetch
-                        and start == 0
-                        and layer_index + 1 < len(core.layers)
-                    ):
-                        expert_cache.prefetch_layer(layer_index + 1)
-                    if callable(record_compute_submit):
-                        record_compute_submit(layer_index)
-                    eval_prompt_cache([layer_cache], output)
+                    diagnostic = _PrefillSync(layer_cache) if sync_enabled else None
+                    try:
+                        if diagnostic is None:
+                            output = layer(chunk, chunk_ids, mask, layer_cache)
+                        else:
+                            diagnostic("attention_input", chunk, chunk_ids,
+                                       *(() if mask is None else (mask,)))
+                            output = layer(chunk, chunk_ids, mask, layer_cache,
+                                           prefill_boundary=diagnostic)
+                        if (
+                            batched_expert_prefill and next_layer_prefetch
+                            and start == 0
+                            and layer_index + 1 < len(core.layers)
+                        ):
+                            expert_cache.prefetch_layer(layer_index + 1)
+                        if callable(record_compute_submit):
+                            record_compute_submit(layer_index)
+                        if diagnostic is None:
+                            eval_prompt_cache([layer_cache], output)
+                        else:
+                            diagnostic("complete", output)
+                    except GenerationCancelled:
+                        raise
+                    except Exception as error:
+                        if diagnostic is not None:
+                            error.add_note(diagnostic.failure_note())
+                        error.add_note(
+                            f"Qwen prefill: layer={layer_index} (0-based) "
+                            f"token_range=[{start},{end}) step_size={step_size}"
+                        )
+                        raise
                     outputs.append(output)
             hidden = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=1)
             mx.eval(hidden)
             if layer_index + 1 == len(core.layers):
+                if sync_enabled:
+                    print("[DEBUG-qwen-prefill-sync] completed; "
+                          f"layers={len(core.layers)} tokens={len(token_ids)}",
+                          file=sys.stderr, flush=True)
                 return hidden

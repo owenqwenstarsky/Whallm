@@ -379,6 +379,11 @@ class PLELayer(nn.Module):
 
 # Below this many queries the per-query gather reads fewer bytes than full KV.
 MASKED_PREFILL_MIN_QUERIES = 16
+# Above this many keys, masked SDPA costs grow with every key, while the gathered
+# path reads a fixed ~2K keys per query. On M2 Max the gathered path was faster
+# beyond ~75K keys, and masked prefill at 87K+ keys hit Metal "Impacting
+# Interactivity" aborts that stopped with the gathered path (2026-10-11/12).
+MASKED_PREFILL_MAX_KEYS = 65_536
 
 
 def qsa_causal_block_mask(
@@ -542,7 +547,8 @@ class QSAAttention(nn.Module):
             # per query or build unused index pools. Raw index cache was updated
             # by __call__, so crossing the sparse threshold remains valid.
             return dense_causal_attention(query, key, value, offset)
-        masked = self.masked_prefill and query.shape[2] >= MASKED_PREFILL_MIN_QUERIES
+        masked = (self.masked_prefill and query.shape[2] >= MASKED_PREFILL_MIN_QUERIES
+                  and key.shape[2] <= MASKED_PREFILL_MAX_KEYS)
         if masked and key.shape[2] <= self.args.indexer_budget:
             from .qwen_tensor_ops import dense_causal_attention
             return dense_causal_attention(query, key, value, offset)
@@ -659,7 +665,9 @@ class QSAAttention(nn.Module):
         return mx.concatenate(outputs, axis=2)
 
     def _masked_attention(self, query, key, value, index_query, pooled, offset):
-        """Fused SDPA over the full KV with a mask of exactly the selected keys.
+        """SDPA over the full KV with a mask of exactly the selected keys.
+
+        MLX 0.32.2 runs this head_dim=256 masked call unfused for multi-query chunks.
 
         The indexer, top-k blocks, complete-block limit and causal tail are the
         same as the gathered path, so each query sees the same key set. Only the
@@ -982,10 +990,13 @@ class DecoderLayer(nn.Module):
         rope_positions=None,
         *,
         allow_packed_gdn: bool = True,
+        prefill_boundary: Callable | None = None,
     ) -> mx.array:
         if self.ple is not None:
             hidden = hidden + self.ple(hidden, input_ids, cache)
         mixed, residual, injection = self.attn_hyper_connection(hidden)
+        if prefill_boundary is not None:
+            prefill_boundary("attention", mixed, residual, injection)
         if self.layer_type == "linear_attention":
             if self.packed_gdn_prefill:
                 result = self.linear_attn(mixed, mask, cache,
@@ -994,9 +1005,15 @@ class DecoderLayer(nn.Module):
                 result = self.linear_attn(mixed, mask, cache)
         else:
             result = self.self_attn(mixed, cache, rope_positions)
+        if prefill_boundary is not None:
+            prefill_boundary("experts_input", result)
         hidden = self.attn_hyper_connection.inject(residual, result, injection)
         mixed, residual, injection = self.mlp_hyper_connection(hidden)
+        if prefill_boundary is not None:
+            prefill_boundary("experts", mixed, residual, injection)
         result = self.mlp(mixed)
+        if prefill_boundary is not None:
+            prefill_boundary("layer_output", result)
         return self.mlp_hyper_connection.inject(residual, result, injection)
 
     def advance_state(self, hidden: mx.array, input_ids: mx.array, cache) -> None:

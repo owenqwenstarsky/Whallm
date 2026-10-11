@@ -22,7 +22,7 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from transformers import AutoTokenizer
 
-from .cancellation import check_cancelled
+from .cancellation import GenerationCancelled, check_cancelled
 
 from .dspark import DraftResult, VerificationMetrics, generate_tokens
 from .expert_cache import CacheMetrics
@@ -277,7 +277,7 @@ def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> 
         **({"qwenSortedExpertPrefill": "mlx-v1"}
            if getattr(config, "qwen_sorted_expert_prefill", False) and getattr(config, "qwen_grouped_experts", True)
            else {}),
-        **({"qwenQSAMaskedPrefill": "sdpa-v1"} if getattr(config, "qwen_qsa_masked_prefill", False) else {}),
+        **({"qwenQSAMaskedPrefill": "sdpa-v2-max65536"} if getattr(config, "qwen_qsa_masked_prefill", False) else {}),
         **({"qwenCommonTensors": "affine8-group64-v1"}
            if getattr(config, "qwen_8bit_common_tensors", False) else {}),
         "modelConfigSHA256": _sha256_json(raw_config),
@@ -1251,7 +1251,8 @@ class ModelRuntime:
         self._revision = getattr(installed, "revision", "")
         self._manifest_format = getattr(installed, "format_version", 1)
         from .memory_budget import resolve_cache_budgets
-        config = resolve_cache_budgets(installed, config)
+        from .model_support.qwen import masked_prefill_override
+        config = masked_prefill_override(resolve_cache_budgets(installed, config))
         self.config = config
         self.support.validate_config(config)
         self.metrics = RuntimeMetrics()
@@ -1636,6 +1637,19 @@ class ModelRuntime:
                                     generation_tokens=response.generation_tokens,
                                     finish_reason=response.finish_reason,
                                 )
+                except GenerationCancelled:
+                    raise
+                except Exception as error:
+                    generated = self.metrics.snapshot()["runtime_generation_tokens"]
+                    error.add_note(
+                        f"generation: model_kind={self.support.descriptor.kind} "
+                        f"phase={'decode' if generated else 'prefill'} "
+                        f"prompt_tokens={len(prompt_tokens)} generated_tokens={generated} "
+                        f"reused_tokens={reused_tokens} prefill_step_size={step_size} "
+                        f"layer_major_prefill={use_layer_major} "
+                        f"mtp_enabled={mtp is not None} dspark_enabled={dspark is not None}"
+                    )
+                    raise
                 finally:
                     if not completed:
                         discard = getattr(self.expert_cache, "discard_prefetched_layers", None)

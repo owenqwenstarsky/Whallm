@@ -380,6 +380,43 @@ class ModelRuntimeTests(unittest.TestCase):
             make_logits_processors.assert_not_called()
             self.assertEqual(received_options["logits_processors"], [])
 
+    def test_generation_failure_adds_counts_without_prompt_contents(self):
+        installed = SimpleNamespace(root=Path('/tmp/tokenizer'), is_qwen=True,
+                                    maximum_context=262_144)
+        config = SimpleNamespace(dspark_enabled=False, prefill_step_size=2,
+                                 layer_major_prefill=False)
+        for generated in (0, 1):
+            with self.subTest(generated=generated):
+                failure = RuntimeError('injected GPU failure')
+                def fail(*_args, **_kwargs):
+                    if generated:
+                        yield SimpleNamespace(text='output', token=9, prompt_tokens=3,
+                                              generation_tokens=1, finish_reason=None)
+                    raise failure
+                with (
+                    patch('deepseek_v4_ssd.generation.load_model',
+                          return_value=(object(), SimpleNamespace(close=lambda: None))),
+                    patch('deepseek_v4_ssd.generation.AutoTokenizer.from_pretrained',
+                          return_value=SimpleNamespace(bos_token=None,
+                              encode=lambda *_args, **_kwargs: [71, 72, 73])),
+                    patch('deepseek_v4_ssd.model_support.state.make_prompt_cache', return_value=[]),
+                    patch('deepseek_v4_ssd.generation.stream_generate', side_effect=fail),
+                ):
+                    runtime = ModelRuntime(installed, config)
+                    with self.assertRaises(RuntimeError) as caught:
+                        list(runtime.stream('private prompt contents', GenerationOptions(max_tokens=4)))
+                    self.assertIs(caught.exception, failure)
+                    notes = '\n'.join(getattr(failure, '__notes__', []))
+                    self.assertIn('prompt_tokens=3', notes)
+                    self.assertIn(f'generated_tokens={generated}', notes)
+                    self.assertIn('prefill_step_size=2', notes)
+                    self.assertIn('phase=' + ('decode' if generated else 'prefill'), notes)
+                    self.assertNotIn('private prompt contents', notes)
+                    self.assertNotIn('[71, 72, 73]', notes)
+                    self.assertTrue(runtime._generation_lock.acquire(blocking=False))
+                    runtime._generation_lock.release()
+                    runtime.close()
+
     def test_model_load_and_request_share_cross_thread_stream(self):
         load_stream = None
         pending = None
