@@ -382,6 +382,9 @@ MASKED_PREFILL_MIN_QUERIES = 16
 # beyond ~75K keys, and masked prefill at 87K+ keys hit Metal "Impacting
 # Interactivity" aborts that stopped with the gathered path (2026-10-11/12).
 MASKED_PREFILL_MAX_KEYS = 65_536
+# The opt-in selected-block kernel's cost does not grow with the context. Below
+# this many keys masked SDPA was faster on M5 Pro (1,024-query chunks, 2026-10-12).
+SELECTED_KERNEL_MIN_KEYS = 16_384
 
 
 def qsa_causal_block_mask(
@@ -474,6 +477,7 @@ class QSAAttention(nn.Module):
         self.dense_threshold = 0
         self.skip_complete_gather = False
         self.masked_prefill = False
+        self.selected_kernel = False
         self.q_proj = nn.Linear(
             args.hidden_size,
             args.num_attention_heads * args.head_dim * 2,
@@ -580,6 +584,12 @@ class QSAAttention(nn.Module):
             pooled = index_cache.pooled(raw_index_keys, ratio, pool_rows)
         else:
             pooled = pool_rows(raw_index_keys[:, :blocks * ratio], 0)
+        if (self.selected_kernel and query.shape[2] >= MASKED_PREFILL_MIN_QUERIES
+                and key.shape[2] > self.args.indexer_budget
+                and (not masked or key.shape[2] >= SELECTED_KERNEL_MIN_KEYS)):
+            from .qwen_qsa_selected import supported
+            if supported(query, key):
+                return self._selected_attention(query, key, value, index_query, pooled, offset)
         if masked:
             return self._masked_attention(query, key, value, index_query, pooled, offset)
         outputs = []
@@ -686,7 +696,6 @@ class QSAAttention(nn.Module):
         ratio = self.args.indexer_compress_ratio
         blocks = pooled.shape[1]
         key_length = key.shape[2]
-        count = min(self.args.indexer_budget // ratio, blocks)
         positions = mx.arange(key_length)
         # Bound the boolean mask and SDPA scores near 64 MiB per chunk.
         chunk = max(MASKED_PREFILL_MIN_QUERIES, (64 << 20) // (key_length * 4))
@@ -694,14 +703,7 @@ class QSAAttention(nn.Module):
         for start in range(0, query.shape[2], chunk):
             end = min(start + chunk, query.shape[2])
             absolute = mx.arange(start, end) + offset
-            scores = (
-                index_query[:, start:end].astype(mx.float32)
-                @ pooled.swapaxes(-1, -2).astype(mx.float32)
-            )
-            scores = mx.maximum(scores, 0).sum(axis=2)[0]
-            visible = mx.arange(blocks)[None] * ratio + ratio - 1 <= absolute[:, None]
-            scores = mx.where(visible, scores, mx.finfo(scores.dtype).min)
-            chosen = mx.argpartition(-scores, kth=count - 1, axis=-1)[..., :count]
+            chosen = self._chosen_blocks(index_query[:, start:end], pooled, absolute)
             block_mask = mx.put_along_axis(
                 mx.zeros((end - start, blocks), dtype=mx.bool_), chosen,
                 mx.array(True), axis=-1)
@@ -716,6 +718,43 @@ class QSAAttention(nn.Module):
             outputs.append(mx.fast.scaled_dot_product_attention(
                 query[:, :, start:end], key, value,
                 scale=self.args.head_dim**-0.5, mask=mask[None, None]))
+        return mx.concatenate(outputs, axis=2)
+
+    def _chosen_blocks(self, index_query, pooled, absolute):
+        """Top-scoring complete blocks for each query at the ``absolute`` positions.
+
+        When fewer blocks are visible than the budget allows, the rest of the
+        list holds invisible blocks; callers exclude them by position.
+        """
+        ratio = self.args.indexer_compress_ratio
+        blocks = pooled.shape[1]
+        count = min(self.args.indexer_budget // ratio, blocks)
+        scores = (
+            index_query.astype(mx.float32)
+            @ pooled.swapaxes(-1, -2).astype(mx.float32)
+        )
+        scores = mx.maximum(scores, 0).sum(axis=2)[0]
+        visible = mx.arange(blocks)[None] * ratio + ratio - 1 <= absolute[:, None]
+        scores = mx.where(visible, scores, mx.finfo(scores.dtype).min)
+        return mx.argpartition(-scores, kth=count - 1, axis=-1)[..., :count]
+
+    def _selected_attention(self, query, key, value, index_query, pooled, offset):
+        """The masked path's key sets, read block by block instead of masked (opt-in).
+
+        Same selection as ``_masked_attention`` for the same query chunks. FP32
+        scores and softmax, so the output is not bit-identical to either path.
+        """
+        from .qwen_qsa_selected import selected_block_attention
+        ratio = self.args.indexer_compress_ratio
+        # Bound the FP32 index scores near 64 MiB per chunk.
+        chunk = max(MASKED_PREFILL_MIN_QUERIES, (64 << 20) // (pooled.shape[1] * 4))
+        outputs = []
+        for start in range(0, query.shape[2], chunk):
+            end = min(start + chunk, query.shape[2])
+            chosen = self._chosen_blocks(index_query[:, start:end], pooled, mx.arange(start, end) + offset)
+            outputs.append(selected_block_attention(
+                query[:, :, start:end], key, value, chosen, offset + start, ratio,
+                self.args.head_dim**-0.5))
         return mx.concatenate(outputs, axis=2)
 
 
@@ -1840,6 +1879,7 @@ def load(
                 attention.dense_threshold = getattr(config, "qwen_qsa_dense_threshold", 0)
                 attention.skip_complete_gather = getattr(config, "qwen_qsa_skip_complete_gather", True)
                 attention.masked_prefill = getattr(config, "qwen_qsa_masked_prefill", False)
+                attention.selected_kernel = getattr(config, "qwen_qsa_selected_kernel", False)
         model.eval()
         model.load_weights(list(model.sanitize(weights).items()), strict=True)
         model.dspark = None

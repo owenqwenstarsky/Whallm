@@ -18,6 +18,7 @@ DEFAULTS = {
     "qwen_qsa_skip_complete_gather": True,
     "qwen_qsa_dense_threshold": 0,
     "qwen_qsa_masked_prefill": False,
+    "qwen_qsa_selected_kernel": False,
     "qwen_8bit_common_tensors": False,
 }
 
@@ -62,6 +63,8 @@ def validate_flash_config(config) -> None:
         raise ValueError("qwen_qsa_skip_complete_gather must be a boolean")
     if type(getattr(config, "qwen_qsa_masked_prefill", False)) is not bool:
         raise ValueError("qwen_qsa_masked_prefill must be a boolean")
+    if type(getattr(config, "qwen_qsa_selected_kernel", False)) is not bool:
+        raise ValueError("qwen_qsa_selected_kernel must be a boolean")
     common = getattr(config, "qwen_8bit_common_tensors", False)
     if type(common) is not bool:
         raise ValueError("qwen_8bit_common_tensors must be a boolean")
@@ -121,6 +124,11 @@ def _add_qsa_arguments(parser):
                         default=False,
                         help="experimental fused SDPA with the unchanged QSA selection as a mask for "
                         "prompt chunks of 16+ tokens; output is not bit-identical")
+    parser.add_argument("--qwen-qsa-selected-kernel", action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="experimental Metal kernel that reads only the selected QSA key blocks for "
+                        "prompt chunks of 16+ tokens (from 16,384 keys when masked prefill is on); "
+                        "FP32 softmax, output is not bit-identical")
 
 
 def flash_arguments(arguments: argparse.Namespace) -> dict:

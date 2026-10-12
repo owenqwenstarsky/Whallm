@@ -278,6 +278,8 @@ def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> 
            if getattr(config, "qwen_sorted_expert_prefill", False) and getattr(config, "qwen_grouped_experts", True)
            else {}),
         **({"qwenQSAMaskedPrefill": "sdpa-v2-max65536"} if getattr(config, "qwen_qsa_masked_prefill", False) else {}),
+        **({"qwenQSASelectedKernel": "metal-v1-min16384"}
+           if getattr(config, "qwen_qsa_selected_kernel", False) else {}),
         **({"qwenCommonTensors": "affine8-group64-v1"}
            if getattr(config, "qwen_8bit_common_tensors", False) else {}),
         "modelConfigSHA256": _sha256_json(raw_config),
