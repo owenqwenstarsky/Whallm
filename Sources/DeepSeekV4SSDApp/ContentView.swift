@@ -2025,7 +2025,7 @@ struct ModelAdvancedView: View {
           if modelKind.usesQwenEngine {
             Divider()
             toggleField(QwenFlashCopy.commonTensors, hint: QwenFlashCopy.commonTensorsHint,
-              value: optionalToggle(\.qwen8BitCommonTensors, defaultValue: false))
+              value: optionalToggle(\.qwen8BitCommonTensors, defaultValue: true))
           }
           if modelKind.descriptor.editableSettings.contains("kvCachePrecision") {
             Divider()

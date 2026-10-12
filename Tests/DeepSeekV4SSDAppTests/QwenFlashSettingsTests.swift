@@ -88,7 +88,7 @@ final class QwenFlashSettingsTests: XCTestCase {
     var json = try object(runtime)
     for key in ["qwen_expert_wave_slots", "qwen_ngram_io", "qwen_ngram_cache_bytes",
                 "qwen_packed_gdn_prefill", "qwen_sorted_expert_prefill", "qwen_qsa_masked_prefill",
-                "qwen_8bit_common_tensors"] {
+                "qwen_8bit_common_tensors", "qwen_qsa_selected_kernel"] {
       json.removeValue(forKey: key)
     }
     let legacy = try JSONDecoder().decode(ModelCatalog.Entry.Runtime.self,
@@ -101,29 +101,37 @@ final class QwenFlashSettingsTests: XCTestCase {
     XCTAssertEqual(encoded["qwen_sorted_expert_prefill"] as? Bool, false)
     XCTAssertEqual(encoded["qwen_qsa_masked_prefill"] as? Bool, false)
     XCTAssertEqual(encoded["qwen_8bit_common_tensors"] as? Bool, false)
+    XCTAssertEqual(encoded["qwen_qsa_selected_kernel"] as? Bool, false)
   }
 
-  /// The one visible Qwen choice added after the fixed tuning (2026-10-10).
+  /// The one visible Qwen choice added after the fixed tuning (2026-10-10), on by
+  /// default for new and reset Qwen settings since 2026-10-12. Saved choices stay.
   @MainActor
-  func testEightBitResidentWeightsAreAnOptInForQwenOnly() throws {
+  func testEightBitResidentWeightsAreOnByDefaultForQwenOnly() throws {
     for kind in ModelLibrary.supportedModelKinds {
       let defaults = ModelAdvancedSettings.defaults(for: kind)
-      XCTAssertEqual(defaults.qwen8BitCommonTensors, false)
+      XCTAssertEqual(defaults.qwen8BitCommonTensors, kind.usesQwenEngine)
       XCTAssertEqual(try object(catalog(defaults, kind: kind).models[0].runtime)["qwen_8bit_common_tensors"]
-        as? Bool, false)
+        as? Bool, kind.usesQwenEngine)
     }
     for kind in qwenKinds {
       var saved = ModelAdvancedSettings.defaults(for: kind)
-      saved.qwen8BitCommonTensors = true
+      saved.qwen8BitCommonTensors = false
       let loaded = try JSONDecoder().decode(ModelAdvancedSettings.self,
         from: JSONEncoder().encode(saved)).normalized(for: kind)
-      XCTAssertEqual(loaded.qwen8BitCommonTensors, true)
+      XCTAssertEqual(loaded.qwen8BitCommonTensors, false)
       XCTAssertNoThrow(try loaded.validate(for: kind))
       XCTAssertEqual(try object(catalog(loaded, kind: kind).models[0].runtime)["qwen_8bit_common_tensors"]
-        as? Bool, true)
+        as? Bool, false)
+      // Preferences saved before the setting existed get the current default.
+      var old = try object(saved)
+      old.removeValue(forKey: "qwen8BitCommonTensors")
+      let missing = try JSONDecoder().decode(ModelAdvancedSettings.self,
+        from: JSONSerialization.data(withJSONObject: old)).normalized(for: kind)
+      XCTAssertEqual(missing.qwen8BitCommonTensors, true)
       var reset = ModelSettingsResetConfirmation()
       reset.begin(for: kind, locked: false); reset.advance()
-      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.qwen8BitCommonTensors, false)
+      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.qwen8BitCommonTensors, true)
     }
     var qwen = ModelAdvancedSettings.defaults(for: .qwen3_8FlashNext)
     qwen.qwen8BitCommonTensors = true
@@ -132,6 +140,28 @@ final class QwenFlashSettingsTests: XCTestCase {
       XCTAssertEqual(other.qwen8BitCommonTensors, false)
       XCTAssertEqual(try object(catalog(other, kind: kind).models[0].runtime)["qwen_8bit_common_tensors"]
         as? Bool, false)
+    }
+  }
+
+  /// 2026-10-12: Qwen splits each whole-layer Prefill read into 8 jobs by default.
+  /// Saved worker counts stay; the setting remains visible.
+  @MainActor
+  func testQwenPrefetchReadWorkersDefaultToEightAndSavedCountsStay() throws {
+    for kind in ModelLibrary.supportedModelKinds {
+      let defaults = ModelAdvancedSettings.defaults(for: kind)
+      XCTAssertEqual(defaults.prefetchReadWorkers, kind.usesQwenEngine ? 8 : 2)
+      XCTAssertEqual(try object(catalog(defaults, kind: kind).models[0].runtime)["prefetch_read_workers"]
+        as? Int, kind.usesQwenEngine ? 8 : 2)
+    }
+    for kind in qwenKinds {
+      var saved = ModelAdvancedSettings.defaults(for: kind)
+      saved.prefetchReadWorkers = 2
+      let loaded = try JSONDecoder().decode(ModelAdvancedSettings.self,
+        from: JSONEncoder().encode(saved)).normalized(for: kind)
+      XCTAssertEqual(loaded.prefetchReadWorkers, 2)
+      var reset = ModelSettingsResetConfirmation()
+      reset.begin(for: kind, locked: false); reset.advance()
+      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.prefetchReadWorkers, 8)
     }
   }
 
@@ -170,6 +200,7 @@ final class QwenFlashSettingsTests: XCTestCase {
       XCTAssertEqual(json["qwen_qsa_query_chunk"] as? Int, 16)
       XCTAssertEqual(json["qwen_sorted_expert_prefill"] as? Bool, qwen)
       XCTAssertEqual(json["qwen_qsa_masked_prefill"] as? Bool, qwen)
+      XCTAssertEqual(json["qwen_qsa_selected_kernel"] as? Bool, qwen)
       XCTAssertEqual(json["qwen_packed_gdn_prefill"] as? Bool, false)
       XCTAssertEqual(json["mtp_enabled"] as? Bool, qwen)
       if let base = ProcessInfo.processInfo.environment["WHALLM_QWEN_UI_ARTIFACTS"] {

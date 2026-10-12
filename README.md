@@ -68,7 +68,7 @@ Added in 1.1.10.
 
 - Both Qwen models show the same short **Advanced Settings**: Alias, generation, memory, read workers, Prompt Cache, warmup, MTP and 8-bit resident weights. Everything else uses fixed values.
 - MTP is on by default. It usually speeds up output, but not for every prompt. Output can differ slightly from output with MTP off.
-- **Use 8-bit resident weights** is off by default. It keeps the weights that stay in memory, except experts, in 8 bits instead of BF16. This uses less memory and usually speeds up output, most with MTP on. Output can differ slightly from output with the setting off.
+- **Use 8-bit resident weights** is on by default for new or reset settings; saved settings keep their choice. It keeps the weights that stay in memory, except experts, in 8 bits instead of BF16. This uses less memory and usually speeds up output, most with MTP on. Output can differ slightly from output with the setting off.
 
 ### Images
 

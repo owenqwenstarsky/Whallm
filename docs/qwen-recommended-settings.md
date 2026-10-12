@@ -2,9 +2,10 @@
 
 > **Removed from the App on 2026-10-09.** Neither Qwen model shows the Qwen Flash
 > experiments section any more. Their hidden options use fixed values (waves 0, mmap
-> N-gram reads, QSA queries per chunk 16, sorted expert prefill and masked QSA prefill
-> on, Packed GDN off). The runtime and CLI options below still exist. This page records
-> the former App controls.
+> N-gram reads, QSA queries per chunk 16, sorted expert prefill, masked QSA prefill and
+> the selected-block QSA kernel on, Packed GDN off). The runtime and CLI options below
+> still exist. This page records the former App controls. Since 2026-10-12, new or reset
+> Qwen settings use 8 prefetch read workers instead of the 2 in the tables below.
 
 These are **experimental starting points, not measured optimal presets**. They
 assume one active request, Whallm's pinned MXFP4 installed model, a local SSD,

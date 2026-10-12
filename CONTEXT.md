@@ -46,8 +46,12 @@ rewriting the artifact. Installation folders, settings, Aliases and prompt
 caches stay separate from the FP8 model. The new artifact includes its own MTP
 weights; Swift never downloads the FP8 model's MTP. Both Qwen model kinds show the same short list
 of Advanced Settings and fix their other runtime options, with MTP, sorted expert
-prefill and masked QSA prefill on. Masked QSA prefill applies up to 65,536 keys;
-longer contexts use the gathered QSA path.
+prefill, masked QSA prefill and the selected-block QSA kernel on. Prompt chunks of
+16 or more tokens use masked QSA prefill below 16,384 keys and, from 16,384 keys,
+the selected-block kernel, which reads only the key blocks QSA selected. Shorter
+calls, including Decode and MTP verification, use the gathered QSA path. New or
+reset Qwen settings also turn on 8-bit resident weights and split each whole-layer
+Prefill read into 8 jobs; saved settings keep their values.
 
 Both Qwen model kinds accept still images through App Chat and the Chat/Responses
 APIs. Each installation includes its own pinned `vision/common.bin` (897,864,704

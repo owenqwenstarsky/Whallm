@@ -14,8 +14,11 @@ from deepseek_v4_ssd.qwen_flash_config import validate_flash_config
 FIXED_QWEN = dict(qwen_expert_wave_slots=0, qwen_ngram_io="mmap", qwen_ngram_cache_bytes=0,
     qwen_qsa_query_chunk=16, qwen_qsa_skip_complete_gather=True, qwen_prefill_read_experts=1,
     qwen_prefill_seed_experts=0, qwen_packed_gdn_prefill=False, qwen_sorted_expert_prefill=True,
-    qwen_qsa_masked_prefill=True, mtp_enabled=True)
-NEUTRAL = dict(FIXED_QWEN, qwen_sorted_expert_prefill=False, qwen_qsa_masked_prefill=False, mtp_enabled=False)
+    qwen_qsa_masked_prefill=True, qwen_qsa_selected_kernel=True, mtp_enabled=True,
+    qwen_8bit_common_tensors=True, prefetch_read_workers=8)
+NEUTRAL = dict(FIXED_QWEN, qwen_sorted_expert_prefill=False, qwen_qsa_masked_prefill=False,
+    qwen_qsa_selected_kernel=False, mtp_enabled=False, qwen_8bit_common_tensors=False,
+    prefetch_read_workers=2)
 
 
 def validate(directory: Path) -> int:
