@@ -219,8 +219,8 @@ class NGramStore:
         self.weight_scale = weight_scale
         self.optimized = optimized
         if optimized:
-            from .qwen_ngram_lookup import fp8_table
-            self._fp8_table = fp8_table(weight_scale)
+            from .qwen_ngram_lookup import device_table, fp8_table
+            self._fp8_values = device_table(fp8_table(weight_scale))
         self._row_count = descriptor.shard_count * descriptor.shard_row_count
         self._reader = None
         self._rows = None
@@ -275,14 +275,12 @@ class NGramStore:
             request_rows(self._rows._mmap, row_ids, self.descriptor.row_bytes)
             if self.optimized:
                 from .qwen_ngram_lookup import lookup_rows
-                return lookup_rows(self._rows, row_ids, self._fp8_table)
+                return lookup_rows(self._rows, row_ids, self._fp8_values)
         copied = (self._reader.lookup(row_ids) if self._reader is not None
                   else np.array(self._rows[row_ids], copy=True))
         if self.optimized:
-            decoded = self._fp8_table[copied]
-            if np.isnan(decoded).any():
-                raise ValueError("Qwen N-gram store contains NaN")
-            return mx.array(decoded).astype(mx.bfloat16)
+            from .qwen_ngram_lookup import decode
+            return decode(copied, self._fp8_values)
         exponent = (copied >> 3) & 0x0F
         mantissa = copied & 0x07
         sign = np.where(copied & 0x80, -1.0, 1.0)
@@ -956,8 +954,9 @@ class SparseMoE(nn.Module):
         indices = mx.argpartition(probabilities, kth=-self.top_k, axis=-1)[..., -self.top_k :]
         return probabilities, indices
 
-    def __call__(self, value: mx.array) -> mx.array:
-        probabilities, indices = self.route(value)
+    def __call__(self, value: mx.array, routes: tuple[mx.array, mx.array] | None = None) -> mx.array:
+        """``routes`` is ``self.route(value)`` when the caller already computed it."""
+        probabilities, indices = self.route(value) if routes is None else routes
         scores = mx.take_along_axis(probabilities, indices, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
@@ -1042,20 +1041,37 @@ class DecoderLayer(nn.Module):
             prefill_boundary("experts_input", result)
         return self.attn_hyper_connection.inject(residual, result, injection)
 
-    def feed_forward(self, hidden: mx.array, *, prefill_boundary: Callable | None = None) -> mx.array:
-        """MoE half of the layer, applied to the output of ``attend``."""
-        mixed, residual, injection = self.mlp_hyper_connection(hidden)
+    def feed_forward(
+        self,
+        hidden: mx.array,
+        *,
+        prefill_boundary: Callable | None = None,
+        prepared: tuple | None = None,
+    ) -> mx.array:
+        """MoE half of the layer, applied to the output of ``attend``.
+
+        ``prepared`` is ``prepare_feed_forward(hidden)``. Passing it reuses the
+        mixer and router results instead of computing them a second time.
+        """
+        if prepared is None:
+            mixed, residual, injection = self.mlp_hyper_connection(hidden)
+            routes = None
+        else:
+            mixed, residual, injection, routes = prepared
         if prefill_boundary is not None:
             prefill_boundary("experts", mixed, residual, injection)
-        result = self.mlp(mixed)
+        result = self.mlp(mixed) if routes is None else self.mlp(mixed, routes)
         if prefill_boundary is not None:
             prefill_boundary("layer_output", result)
         return self.mlp_hyper_connection.inject(residual, result, injection)
 
-    def expert_routes(self, hidden: mx.array) -> mx.array:
-        """Expert indices that ``feed_forward`` will select for this input."""
-        mixed, _, _ = self.mlp_hyper_connection(hidden)
-        return self.mlp.route(mixed)[1]
+    def prepare_feed_forward(self, hidden: mx.array) -> tuple:
+        """Mixer outputs and router results that ``feed_forward`` computes for this input.
+
+        The selected experts are ``prepared[3][1]``.
+        """
+        mixed, residual, injection = self.mlp_hyper_connection(hidden)
+        return mixed, residual, injection, self.mlp.route(mixed)
 
     def advance_state(self, hidden: mx.array, input_ids: mx.array, cache) -> None:
         """Advance PLE and linear-attention state for these inputs, skipping the MoE."""

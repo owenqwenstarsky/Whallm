@@ -140,6 +140,23 @@ class RoutedPrefillTests(unittest.TestCase):
                     self.assertEqual(routed[2], sum(map(len, routed[3])) * installed.expert_blob_size)
                     self.assertLess(routed[2], full[2])
 
+    def test_routed_prefill_runs_each_router_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installed, _ = write_experts(Path(directory), layers=2, seed=15)
+            tokens = [3, 17, 5, 9, 41, 2]
+            full = self.run_prefill(installed, tokens, 0, 4)
+            with patch.object(qwen.SparseMoE, "route", autospec=True,
+                              side_effect=qwen.SparseMoE.route) as route, \
+                 patch.object(qwen.GatedResidual, "__call__", autospec=True,
+                              side_effect=qwen.GatedResidual.__call__) as mixer:
+                routed = self.run_prefill(installed, tokens, len(tokens), 4)
+            np.testing.assert_array_equal(routed[0], full[0])
+            for got, want in zip(routed[1], full[1]):
+                np.testing.assert_array_equal(got, want)
+            # Two layers, two spans: one router and two mixers (attention, MoE) each.
+            self.assertEqual(route.call_count, 2 * 2)
+            self.assertEqual(mixer.call_count, 2 * 2 * 2)
+
     def test_longer_prompts_keep_whole_layer_reads(self):
         with tempfile.TemporaryDirectory() as directory:
             installed, _ = write_experts(Path(directory), layers=2, seed=12)

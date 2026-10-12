@@ -392,15 +392,16 @@ def _qwen_routed_layer_major_prefill(
                                    f"token_range=[{start},{end}) step_size={step_size}")
                     raise
                 attended.append(output)
-            routes = [layer.expert_routes(value) for value in attended]
-            mx.eval(*routes)
-            experts = np.unique(np.concatenate([np.asarray(route).reshape(-1) for route in routes]))
+            # The MoE halves below reuse these mixer and router results.
+            prepared = [layer.prepare_feed_forward(value) for value in attended]
+            mx.eval(*(item[3][1] for item in prepared))
+            experts = np.unique(np.concatenate([np.asarray(item[3][1]).reshape(-1) for item in prepared]))
             outputs = []
             with expert_cache.batched_layer(layer_index, experts=tuple(experts.tolist())):
-                for (start, end), value in zip(spans, attended):
+                for (start, end), value, ready in zip(spans, attended, prepared):
                     check_cancelled()
                     try:
-                        output = layer.feed_forward(value)
+                        output = layer.feed_forward(value, prepared=ready)
                         if callable(record_compute_submit):
                             record_compute_submit(layer_index)
                         mx.eval(output)
@@ -412,7 +413,7 @@ def _qwen_routed_layer_major_prefill(
                                        f"step_size={step_size}")
                         raise
                     outputs.append(output)
-            del attended, routes
+            del attended, prepared
             hidden = outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=1)
             mx.eval(hidden)
         return hidden

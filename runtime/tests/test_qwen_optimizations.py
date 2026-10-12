@@ -158,12 +158,16 @@ class QwenOptimizationTests(unittest.TestCase):
             rows = np.concatenate([valid[::-1], valid, valid]).reshape(3, -1)
             for scale in (0.5, 0.123456789, 5.3):
                 baseline = NGramStore(path, descriptor, scale)
-                candidate = NGramStore(path, descriptor, scale, optimized=True)
-                for ids in (rows, np.array(3), np.empty((1, 0, 16), dtype=np.int64)):
-                    np.testing.assert_array_equal(bits(candidate.lookup(ids)), bits(baseline.lookup(ids)))
-                for invalid in (127, 255, -1, 256):
-                    with self.assertRaises(ValueError):
-                        candidate.lookup(np.array([invalid]))
+                for backend in ("mmap", "pread"):
+                    candidate = NGramStore(path, descriptor, scale, optimized=True, io_backend=backend)
+                    self.addCleanup(candidate.close)
+                    for ids in (rows, np.array(3), np.empty((1, 0, 16), dtype=np.int64)):
+                        with self.subTest(scale=scale, backend=backend, shape=ids.shape):
+                            np.testing.assert_array_equal(bits(candidate.lookup(ids)),
+                                                          bits(baseline.lookup(ids)))
+                    for invalid in (127, 255, -1, 256):
+                        with self.assertRaises(ValueError):
+                            candidate.lookup(np.array([invalid]))
 
     def test_mapped_rows_request_each_of_their_pages_once(self):
         class Mapped:
