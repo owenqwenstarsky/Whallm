@@ -251,13 +251,16 @@ struct MemoryPlanningProfile {
     // Resident-weight repacking happens after loading, so loading still holds BF16.
     // 8-bit keeps values plus BF16 scales and biases per 64: 17/32 of BF16.
     // 8-bit restores a whole weight only for products of more than 16 rows.
-    // 1-bit experts replace the retained MXFP4 slot after the read. Any MXFP4
-    // matrix becomes 6/17 of its blob (1-bit group 64 versus MXFP4 group 32).
-    // Whole-layer prefill still stages the installed blobs. Each product restores
-    // one matrix; gate_up is the larger one (2 * intermediate * hidden, BF16).
+    // The chosen share of resident experts is stored entirely in 2 bits after
+    // the read. One fully quantized matrix is 10/17 of its MXFP4 blob, so share
+    // S keeps 1 - S * 7/17. The other experts stay MXFP4. Whole-layer prefill
+    // still stages the installed blobs. A 2-bit product restores one whole
+    // gate_up matrix (2 * intermediate * hidden, BF16) and then drops it.
     let repacked = qwen && s.qwen8BitCommonTensors == true
     let droppedShare = 15.0
-    let oneBitExperts = qwen && s.qwen1BitExperts == true
+    let twoBitShare = qwen && s.qwen2BitExperts == true
+      ? Double(min(100, max(0, s.qwen2BitExpertPercent ?? 50))) / 100 : 0
+    let retainedFactor = 1 - twoBitShare * 7 / 17
     func repackedBytes(_ tensors: [InstalledTensor]?) -> [(name: String, bytes: Double, columns: Double)] {
       guard repacked else { return [] }
       // The runtime's rule: BF16 projections with at least 256 output rows, except routers.
@@ -269,8 +272,8 @@ struct MemoryPlanningProfile {
     let repackedMain = repackedBytes(manifest.commonTensors)
     let repackedMTP = repackedBytes(mtp ? manifest.mtp?.commonTensors : nil)
     let residentWeights = weights - repackedMain.reduce(0) { $0 + $1.bytes } * droppedShare / 32
-    let retainedExpert = oneBitExperts ? expert * 6 / 17 : expert
-    let retainedAuxiliaryExperts = oneBitExperts ? auxiliaryExperts * 6 / 17 : auxiliaryExperts
+    let retainedExpert = expert * retainedFactor
+    let retainedAuxiliaryExperts = auxiliaryExperts * retainedFactor
     let auxiliary = auxiliaryWeights - repackedMTP.reduce(0) { $0 + $1.bytes } * droppedShare / 32
       + retainedAuxiliaryExperts + auxiliaryState
     // V4.1 DSpark retains one target + draft snapshot per request; Qwen MTP keeps
@@ -298,7 +301,7 @@ struct MemoryPlanningProfile {
     let layerCopies = kind == .deepSeekV4 || s.nextLayerPrefetch == true ? 2.0 : 1.0
     let seededMXFP4 = qwen && batched
       ? min(expert, Double(blob) * Double(manifest.layerCount) * Double(s.qwenPrefillSeedExperts ?? 0)) : 0
-    let seeded = oneBitExperts ? seededMXFP4 * 6 / 17 : seededMXFP4
+    let seeded = seededMXFP4 * retainedFactor
     let prefillExperts = batched
       ? Double(blob) * Double(manifest.expertCount) * layerCopies + seeded : retainedExpert
 
@@ -337,7 +340,7 @@ struct MemoryPlanningProfile {
     let prefillWeights = (repackedMain + repackedMTP)
       .filter { !layerMajor || $0.name != "lm_head.weight" }
     let restoredWeight = step > 16 ? restoredBytes(prefillWeights) : 0
-    let restoredExpert = oneBitExperts ? 4 * intermediate * hidden : 0
+    let restoredExpert = twoBitShare > 0 ? 4 * intermediate * hidden : 0
     let prefillWork = max(attentionWork(step), moeWork(moeStep), logits) + cache.growth + restoredWeight + restoredExpert
     // Each layer-major chunk retains one SharedState. Its arrays use that
     // chunk's visible history, not the final cache's reserved capacity.

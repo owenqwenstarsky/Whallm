@@ -258,32 +258,64 @@ class FlashConfigTests(unittest.TestCase):
         settings.validate_flash_config(SimpleNamespace(qwen_expert_wave_slots=512,
             qwen_ngram_io="pread", qwen_ngram_cache_bytes=512 * 1024**2))
 
-    def test_one_bit_experts_are_off_and_leave_other_weights_alone(self):
-        self.assertIs(settings.DEFAULTS["qwen_1bit_experts"], False)
+    def test_two_bit_experts_are_off_and_default_to_half(self):
+        self.assertIs(settings.DEFAULTS["qwen_2bit_experts"], False)
+        self.assertEqual(settings.DEFAULTS["qwen_2bit_expert_percent"], 50)
+        self.assertNotIn("qwen_1bit_experts", settings.DEFAULTS)
         self.assertNotIn("qwen_1bit_common_tensors", settings.DEFAULTS)
         parser = argparse.ArgumentParser()
         settings.add_flash_arguments(parser)
-        self.assertIs(settings.flash_arguments(parser.parse_args([]))["qwen_1bit_experts"], False)
-        enabled = settings.flash_arguments(parser.parse_args(["--qwen-1bit-experts"]))
-        self.assertIs(enabled["qwen_1bit_experts"], True)
+        defaults = settings.flash_arguments(parser.parse_args([]))
+        self.assertIs(defaults["qwen_2bit_experts"], False)
+        self.assertEqual(defaults["qwen_2bit_expert_percent"], 50)
+        enabled = settings.flash_arguments(parser.parse_args(
+            ["--qwen-2bit-experts", "--qwen-2bit-expert-percent", "25"]))
+        self.assertIs(enabled["qwen_2bit_experts"], True)
+        self.assertEqual(enabled["qwen_2bit_expert_percent"], 25)
         self.assertIs(enabled["qwen_8bit_common_tensors"], False)
         settings.validate_flash_config(SimpleNamespace(**{
-            **settings.DEFAULTS, "qwen_1bit_experts": True, "qwen_8bit_common_tensors": True}))
+            **settings.DEFAULTS, "qwen_2bit_experts": True, "qwen_2bit_expert_percent": 50,
+            "qwen_8bit_common_tensors": True}))
         settings.validate_flash_config(SimpleNamespace(**{
-            **settings.DEFAULTS, "qwen_1bit_experts": True, "ane_prefill": True, "ane_prefill_ratio": 0.5}))
+            **settings.DEFAULTS, "qwen_2bit_experts": True, "qwen_2bit_expert_percent": 0,
+            "ane_prefill": True, "ane_prefill_ratio": 0.5, "staged_expert_streaming": True}))
         for changes in (
-            {"qwen_1bit_experts": 1},
-            {"qwen_1bit_experts": True, "staged_expert_streaming": True},
+            {"qwen_2bit_experts": 1},
+            {"qwen_2bit_expert_percent": 101},
+            {"qwen_2bit_expert_percent": True},
+            {"qwen_2bit_experts": True, "qwen_2bit_expert_percent": 50, "staged_expert_streaming": True},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 settings.validate_flash_config(SimpleNamespace(**{**settings.DEFAULTS, **changes}))
 
-    def test_one_bit_expert_storage_is_six_seventeenths_of_mxfp4(self):
-        # group 64 affine 1-bit versus group 32 MXFP4, for any column multiple of 64.
+    def test_two_bit_share_rounds_to_groups_and_saves_seven_seventeenths(self):
+        for percent in (0, 1, 50, 100):
+            chosen = [i for i in range(512) if settings.expert_uses_two_bit(i, 512, percent)]
+            if percent == 0:
+                self.assertEqual(chosen, [])
+            elif percent == 100:
+                self.assertEqual(len(chosen), 512)
+            else:
+                self.assertEqual(len(chosen), 512 * percent // 100)
+        self.assertEqual(settings.quantized_expert_columns(2560, 0), 0)
+        self.assertEqual(settings.quantized_expert_columns(2560, 1), 64)
+        self.assertEqual(settings.quantized_expert_columns(2560, 50), 1280)
+        self.assertEqual(settings.quantized_expert_columns(128, 50), 64)
+        self.assertEqual(settings.quantized_expert_columns(64, 50), 64)
+        self.assertEqual(settings.quantized_expert_columns(2560, 100), 2560)
+        self.assertFalse(settings.resident_two_bit(SimpleNamespace(
+            qwen_2bit_experts=True, qwen_2bit_expert_percent=0))[0])
+        self.assertEqual(settings.resident_two_bit(SimpleNamespace(
+            qwen_2bit_experts=True, qwen_2bit_expert_percent=50)), (True, 50))
+        # Full 2-bit is 10/17 of MXFP4. Half of an even group count saves 7/34.
         for rows, cols in ((8, 64), (1280, 2560), (2560, 640)):
-            mxfp4 = rows * cols // 2 + rows * cols // 32
-            one_bit = rows * cols // 8 + rows * (cols // 64) * 4
-            self.assertEqual(one_bit * 17, mxfp4 * 6)
+            mxfp4 = settings.mxfp4_matrix_bytes(rows, cols)
+            full = settings.two_bit_matrix_bytes(rows, cols, cols)
+            self.assertEqual(full * 17, mxfp4 * 10)
+            half_columns = settings.quantized_expert_columns(cols, 50)
+            if half_columns * 2 == cols:
+                half = settings.two_bit_matrix_bytes(rows, cols, half_columns)
+                self.assertEqual(half * 34, mxfp4 * 27)
 
 
 if __name__ == "__main__":

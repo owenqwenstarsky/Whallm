@@ -386,7 +386,7 @@ class _SlotPool:
     _alignment = 0
 
     def __init__(self, model: InstalledModel, slots: int, direct_alignment: int = 0,
-                 one_bit_experts: bool = False) -> None:
+                 two_bit_experts: bool = False, two_bit_percent: int = 50) -> None:
         self._model = model
         self._source_regions = {
             region.name: region for region in model.expert_regions
@@ -413,11 +413,12 @@ class _SlotPool:
                 (direct_alignment - granule + blob + direct_alignment - 1)
                 // direct_alignment * direct_alignment
             )
-        self._one_bit_experts = one_bit_experts
+        self._two_bit_experts = two_bit_experts
+        self._two_bit_percent = two_bit_percent
         self._slots: list[mx.array | None] = [None] * slots
         self._views: list[memoryview | None] = [None] * slots
         self._slot_weights: list[dict[int, object] | None] = [None] * slots
-        self._one_bit: list[object | None] = [None] * slots
+        self._two_bit: list[object | None] = [None] * slots
         self._shifts = [0] * slots
         self._loaded = bytearray(slots)
 
@@ -427,7 +428,7 @@ class _SlotPool:
         if slots < previous:
             del self._views[slots:]
             del self._slot_weights[slots:]
-            del self._one_bit[slots:]
+            del self._two_bit[slots:]
             del self._slots[slots:]
             del self._shifts[slots:]
             del self._loaded[slots:]
@@ -435,7 +436,7 @@ class _SlotPool:
             self._slots.extend([None] * (slots - previous))
             self._views.extend([None] * (slots - previous))
             self._slot_weights.extend([None] * (slots - previous))
-            self._one_bit.extend([None] * (slots - previous))
+            self._two_bit.extend([None] * (slots - previous))
             self._shifts.extend([0] * (slots - previous))
             self._loaded.extend(bytes(slots - previous))
 
@@ -472,9 +473,12 @@ class _SlotPool:
                 if self._views[slot] is None and array is not None:
                     self._views[slot] = memoryview(array)
 
-    def select_individual(self, slots: list[int]) -> tuple[ExpertWeights, ...]:
-        if self._one_bit_experts:
-            return self._select_one_bit(slots)
+    def select_individual(self, slots: list[int], expert_ids: list[int] | None = None):
+        if self._two_bit_experts:
+            return self._select_two_bit(slots, expert_ids)
+        return self._select_mxfp4(slots)
+
+    def _select_mxfp4(self, slots: list[int]):
         weights = []
         for slot in slots:
             array = self._slots[slot]
@@ -492,13 +496,23 @@ class _SlotPool:
             weights.append(views[shift])
         return tuple(weights)
 
-    def _select_one_bit(self, slots: list[int]):
-        """Keep the affine 1-bit expert and drop the MXFP4 slot it was read into."""
-        from .qwen_expert_1bit import quantize_qwen_expert
-        weights = []
+    def _select_two_bit(self, slots: list[int], expert_ids: list[int] | None):
+        """Store only the selected experts in 2 bits. The rest keep their MXFP4 slot."""
+        from .qwen_expert_2bit import TwoBitQwenExpert, quantize_qwen_expert
+        from .qwen_flash_config import expert_uses_two_bit
+        if expert_ids is not None and len(expert_ids) != len(slots):
+            raise ValueError("2-bit expert ids must match the selected slots")
+        weights: list = [None] * len(slots)
+        plain_slots = []
         compacted = False
-        for slot in slots:
-            held = self._one_bit[slot]
+        for index, slot in enumerate(slots):
+            expert = None if expert_ids is None else expert_ids[index]
+            selected = expert is not None and expert_uses_two_bit(
+                expert, self._model.expert_count, self._two_bit_percent)
+            if not selected:
+                plain_slots.append((index, slot))
+                continue
+            held = self._two_bit[slot]
             if held is None:
                 array = self._slots[slot]
                 if not self._loaded[slot] or array is None:
@@ -506,15 +520,21 @@ class _SlotPool:
                 shift = self._shifts[slot]
                 mxfp4 = self._layout.individual(
                     [array], lambda packed, name: self._array(packed, name, shift))[0]
-                held = quantize_qwen_expert(mxfp4)
+                held = quantize_qwen_expert(mxfp4, 100)
+                if not isinstance(held, TwoBitQwenExpert):
+                    raise RuntimeError("2-bit expert quantization did not replace the MXFP4 weights")
                 del mxfp4
-                self._one_bit[slot] = held
+                self._two_bit[slot] = held
                 self._slot_weights[slot] = None
                 self._views[slot] = None
                 self._slots[slot] = None
                 self._shifts[slot] = 0
                 compacted = True
-            weights.append(held)
+            weights[index] = held
+        if plain_slots:
+            plain = self._select_mxfp4([slot for _, slot in plain_slots])
+            for (index, _), weight in zip(plain_slots, plain):
+                weights[index] = weight
         if compacted:
             mx.clear_cache()
         return tuple(weights)
@@ -536,7 +556,7 @@ class _SlotPool:
         for slot, blob in zip(slots, blobs):
             if len(blob) != self._model.expert_blob_size:
                 raise ValueError("expert blob size does not match the manifest")
-            self._one_bit[slot] = None
+            self._two_bit[slot] = None
             source = memoryview(blob)
             for name, region in self._source_regions.items():
                 self.writable_region(slot, name)[:] = source[
@@ -569,7 +589,7 @@ class _SlotPool:
 
     def mark_empty(self, slot: int) -> None:
         self._loaded[slot] = 0
-        self._one_bit[slot] = None
+        self._two_bit[slot] = None
 
     def batched(self, packed: mx.array) -> BatchedExperts:
         """View a slot-major arena (paired with write_views), including research callers."""
@@ -725,7 +745,7 @@ class _StagedSlotPool(_SlotPool):
             w13_scales=self._array_from(w13, self._w13_regions["w13.scale"]),
         )
 
-    def select_individual(self, slots: list[int]) -> tuple[ExpertWeights, ...]:
+    def select_individual(self, slots: list[int], expert_ids: list[int] | None = None):
         return tuple(self._weights(slot, require_loaded=True) for slot in slots)
 
     def select_staged_individual(
@@ -787,7 +807,8 @@ class ExpertCache:
         separate_prefill_io: bool = False,
         prefill_read_experts: int = 1,
         prefill_seed_experts: int = 0,
-        one_bit_experts: bool = False,
+        two_bit_experts: bool = False,
+        two_bit_percent: int = 50,
     ) -> None:
         if slots < installed_model.selected_expert_count:
             raise ValueError("slot count must hold at least one token's routed experts")
@@ -808,11 +829,16 @@ class ExpertCache:
         if ((prefill_read_experts != 1 or prefill_seed_experts)
                 and (not installed_model.is_qwen or staged_expert_streaming)):
             raise ValueError("prefill read/seed experiments require direct Qwen slots")
-        if type(one_bit_experts) is not bool:
-            raise ValueError("qwen_1bit_experts must be a boolean")
-        if one_bit_experts and (staged_expert_streaming or not installed_model.is_qwen):
-            raise ValueError("1-bit expert weights require direct Qwen expert slots")
-        self.one_bit_experts = one_bit_experts
+        if type(two_bit_experts) is not bool:
+            raise ValueError("qwen_2bit_experts must be a boolean")
+        if type(two_bit_percent) is not int or not 0 <= two_bit_percent <= 100:
+            raise ValueError("qwen_2bit_expert_percent must be an integer from 0 through 100")
+        if two_bit_experts and two_bit_percent <= 0:
+            raise ValueError("qwen_2bit_experts requires a share greater than 0")
+        if two_bit_experts and (staged_expert_streaming or not installed_model.is_qwen):
+            raise ValueError("2-bit expert weights require direct Qwen expert slots")
+        self.two_bit_experts = two_bit_experts
+        self.two_bit_percent = two_bit_percent
         self.prefill_read_experts = prefill_read_experts
         self.prefill_seed_experts = prefill_seed_experts
         self._prefill_seed_routes = None
@@ -927,7 +953,8 @@ class ExpertCache:
             return _StagedSlotPool(self.model, slots)
         # Cache-bypassing reads need whole blocks; cached reads keep the plain blob slot.
         return _SlotPool(self.model, slots, self.direct_io_alignment,
-                         one_bit_experts=self.one_bit_experts)
+                         two_bit_experts=self.two_bit_experts,
+                         two_bit_percent=self.two_bit_percent)
 
     def close(self) -> None:
         for job in self._prefetched_layers.values():
@@ -1486,8 +1513,10 @@ class ExpertCache:
                 self.metrics.prefill_seeded_experts += len(assigned)
                 self.metrics.prefill_seed_bytes += len(assigned) * self.model.expert_blob_size
                 self.metrics.prefill_seed_seconds += time.perf_counter() - started
-            if self.one_bit_experts:
-                self._pool.select_individual(list(assigned.values()))
+            if self.two_bit_experts:
+                seeded = list(assigned)
+                self._pool.select_individual(
+                    [assigned[expert] for expert in seeded], seeded)
         except BaseException:
             with self._lock:
                 self._release_slots(layer, assigned)
@@ -1573,7 +1602,8 @@ class ExpertCache:
             pack_started = time.perf_counter()
             main_experts = [*resident, *missing]
             main_weights = self._pool.select_individual(
-                [self._entries[(layer, expert)].slot for expert in main_experts]
+                [self._entries[(layer, expert)].slot for expert in main_experts],
+                main_experts,
             )
             self.metrics.pack_seconds += time.perf_counter() - pack_started
             weights_by_expert = dict(zip(main_experts, main_weights))
@@ -1644,7 +1674,7 @@ class ExpertCache:
             # Closing while yielding a cache hit must also drain missing reads.
             for expert, slot in resident:
                 pack_started = time.perf_counter()
-                weights = self._pool.select_individual([slot])[0]
+                weights = self._pool.select_individual([slot], [expert])[0]
                 with self._lock:
                     self.metrics.pack_seconds += time.perf_counter() - pack_started
                 yield expert, weights
@@ -1662,7 +1692,7 @@ class ExpertCache:
                     slot = assigned[expert]
                     self._pool.mark_loaded(slot)
                     pack_started = time.perf_counter()
-                    weights = self._pool.select_individual([slot])[0]
+                    weights = self._pool.select_individual([slot], [expert])[0]
                     self.metrics.pack_seconds += time.perf_counter() - pack_started
                 yield expert, weights
         finally:

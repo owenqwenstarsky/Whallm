@@ -271,8 +271,11 @@
 "Customize MTP strategy" = "自訂 MTP 策略";
 "Use 8-bit resident weights" = "使用 8-bit 常駐權重";
 "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change." = "將常駐記憶體的模型權重（專家除外）由 BF16 改以 8-bit 儲存。可減少記憶體用量並加快生成速度，開啟 MTP 時最明顯。產生的文字可能改變。";
-"Use 1-bit expert weights" = "使用 1-bit 專家權重";
-"Quantizes routed expert weights after they are read into memory and keeps that copy. Installed expert files stay unchanged. Uses less memory for loaded experts. Generated text may change, and output can be slower." = "讀取到記憶體後，將路由專家權重量化為 1-bit 並只保留這份副本。已安裝的專家檔案保持不變。已載入的專家更省記憶體。產生的文字可能改變，輸出也可能變慢。";
+"Use 2-bit expert weights" = "使用 2-bit 專家權重";
+"Stores this percentage of routed experts in 2 bits after they are read into memory. The other experts stay in their original format. Installed expert files stay unchanged. A larger share uses less memory. Generated text may change, and output can be slower." = "讀取到記憶體後，按所選比例把一部分路由專家存為 2-bit，其餘專家保持原來的格式。已安裝的專家檔案保持不變。比例越高越省記憶體。產生的文字可能改變，輸出也可能變慢。";
+"Expert weights in 2 bits" = "以 2-bit 保存的專家權重";
+"Percentage of routed experts stored in 2 bits. The default is 50%. 0% keeps every expert in its original format. 100% stores every routed expert in 2 bits." = "以 2-bit 保存的路由專家比例。預設是 50%。0% 讓每個專家保持原來的格式。100% 將每個路由專家存為 2-bit。";
+"2-bit expert share must be an integer from 0 to 100." = "2-bit 專家比例必須是 0 到 100 的整數。";
 "Reuses completed attention-index blocks instead of recalculating them. Retains extra index data." = "重用已完成區塊的注意力索引，避免重複計算；會保留額外索引資料。";
 "Reads repeated N-gram rows once per lookup and uses a decoding table." = "每次查找只讀取一次重複的 N-gram 資料列，並透過查表解碼。";
 "Reuses a compiled normalization calculation, not the whole generation graph." = "重用已編譯的正規化計算；不是重用整個生成流程。";

@@ -88,7 +88,7 @@ final class QwenFlashSettingsTests: XCTestCase {
     var json = try object(runtime)
     for key in ["qwen_expert_wave_slots", "qwen_ngram_io", "qwen_ngram_cache_bytes",
                 "qwen_packed_gdn_prefill", "qwen_sorted_expert_prefill", "qwen_qsa_masked_prefill",
-                "qwen_8bit_common_tensors", "qwen_1bit_experts", "qwen_qsa_selected_kernel"] {
+                "qwen_8bit_common_tensors", "qwen_2bit_experts", "qwen_2bit_expert_percent", "qwen_qsa_selected_kernel"] {
       json.removeValue(forKey: key)
     }
     let legacy = try JSONDecoder().decode(ModelCatalog.Entry.Runtime.self,
@@ -101,7 +101,8 @@ final class QwenFlashSettingsTests: XCTestCase {
     XCTAssertEqual(encoded["qwen_sorted_expert_prefill"] as? Bool, false)
     XCTAssertEqual(encoded["qwen_qsa_masked_prefill"] as? Bool, false)
     XCTAssertEqual(encoded["qwen_8bit_common_tensors"] as? Bool, false)
-    XCTAssertEqual(encoded["qwen_1bit_experts"] as? Bool, false)
+    XCTAssertEqual(encoded["qwen_2bit_experts"] as? Bool, false)
+    XCTAssertEqual(encoded["qwen_2bit_expert_percent"] as? Int, 50)
     XCTAssertEqual(encoded["qwen_qsa_selected_kernel"] as? Bool, false)
   }
 
@@ -144,43 +145,56 @@ final class QwenFlashSettingsTests: XCTestCase {
     }
   }
 
-  /// Off unless the user turns it on. It does not change 8-bit resident weights.
+  /// Off unless the user turns it on. Enabling starts at 50% and leaves 8-bit weights alone.
   @MainActor
-  func testOneBitExpertWeightsAreOffByDefaultAndLeaveEightBitAlone() throws {
+  func testTwoBitExpertWeightsAreOffByDefaultAndStartAtHalf() throws {
     for kind in ModelLibrary.supportedModelKinds {
       let defaults = ModelAdvancedSettings.defaults(for: kind)
-      XCTAssertEqual(defaults.qwen1BitExperts, false)
-      XCTAssertEqual(try object(catalog(defaults, kind: kind).models[0].runtime)["qwen_1bit_experts"]
-        as? Bool, false)
+      XCTAssertEqual(defaults.qwen2BitExperts, false)
+      XCTAssertEqual(defaults.qwen2BitExpertPercent, 50)
+      let runtime = try object(catalog(defaults, kind: kind).models[0].runtime)
+      XCTAssertEqual(runtime["qwen_2bit_experts"] as? Bool, false)
+      XCTAssertEqual(runtime["qwen_2bit_expert_percent"] as? Int, 50)
     }
     for kind in qwenKinds {
       var saved = ModelAdvancedSettings.defaults(for: kind)
-      saved.qwen1BitExperts = true
+      saved.qwen2BitExperts = true
+      saved.qwen2BitExpertPercent = 25
       saved.qwen8BitCommonTensors = true
       let loaded = try JSONDecoder().decode(ModelAdvancedSettings.self,
         from: JSONEncoder().encode(saved)).normalized(for: kind)
-      XCTAssertEqual(loaded.qwen1BitExperts, true)
+      XCTAssertEqual(loaded.qwen2BitExperts, true)
+      XCTAssertEqual(loaded.qwen2BitExpertPercent, 25)
       XCTAssertEqual(loaded.qwen8BitCommonTensors, true)
       let runtime = try object(catalog(loaded, kind: kind).models[0].runtime)
-      XCTAssertEqual(runtime["qwen_1bit_experts"] as? Bool, true)
+      XCTAssertEqual(runtime["qwen_2bit_experts"] as? Bool, true)
+      XCTAssertEqual(runtime["qwen_2bit_expert_percent"] as? Int, 25)
       XCTAssertEqual(runtime["qwen_8bit_common_tensors"] as? Bool, true)
       var old = try object(saved)
-      old.removeValue(forKey: "qwen1BitExperts")
+      old.removeValue(forKey: "qwen2BitExperts")
+      old.removeValue(forKey: "qwen2BitExpertPercent")
       let missing = try JSONDecoder().decode(ModelAdvancedSettings.self,
         from: JSONSerialization.data(withJSONObject: old)).normalized(for: kind)
-      XCTAssertEqual(missing.qwen1BitExperts, false)
+      XCTAssertEqual(missing.qwen2BitExperts, false)
+      XCTAssertEqual(missing.qwen2BitExpertPercent, 50)
       XCTAssertEqual(missing.qwen8BitCommonTensors, true)
+      saved.qwen2BitExpertPercent = 101
+      XCTAssertThrowsError(try saved.validate(for: kind))
       var reset = ModelSettingsResetConfirmation()
       reset.begin(for: kind, locked: false); reset.advance()
-      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.qwen1BitExperts, false)
+      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.qwen2BitExperts, false)
+      XCTAssertEqual(reset.confirm(for: kind, locked: false)?.qwen2BitExpertPercent, 50)
     }
     var qwen = ModelAdvancedSettings.defaults(for: .qwen3_8FlashNext)
-    qwen.qwen1BitExperts = true
+    qwen.qwen2BitExperts = true
+    qwen.qwen2BitExpertPercent = 80
     for kind in [ModelKind.deepSeekV4, .deepSeekV41, .mimoV26FlashRL] {
       let other = qwen.normalized(for: kind)
-      XCTAssertEqual(other.qwen1BitExperts, false)
-      XCTAssertEqual(try object(catalog(other, kind: kind).models[0].runtime)["qwen_1bit_experts"]
-        as? Bool, false)
+      XCTAssertEqual(other.qwen2BitExperts, false)
+      XCTAssertEqual(other.qwen2BitExpertPercent, 50)
+      let runtime = try object(catalog(other, kind: kind).models[0].runtime)
+      XCTAssertEqual(runtime["qwen_2bit_experts"] as? Bool, false)
+      XCTAssertEqual(runtime["qwen_2bit_expert_percent"] as? Int, 50)
     }
   }
 

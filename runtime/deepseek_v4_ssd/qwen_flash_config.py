@@ -20,8 +20,13 @@ DEFAULTS = {
     "qwen_qsa_masked_prefill": False,
     "qwen_qsa_selected_kernel": False,
     "qwen_8bit_common_tensors": False,
-    "qwen_1bit_experts": False,
+    "qwen_2bit_experts": False,
+    "qwen_2bit_expert_percent": 50,
 }
+
+# Affine 2-bit groups and MXFP4 groups share this column alignment.
+EXPERT_QUANT_GROUP = 64
+_MXFP4_GROUP = 32
 
 
 def validate_flash_config(config) -> None:
@@ -69,11 +74,14 @@ def validate_flash_config(config) -> None:
     common = getattr(config, "qwen_8bit_common_tensors", False)
     if type(common) is not bool:
         raise ValueError("qwen_8bit_common_tensors must be a boolean")
-    one_bit = getattr(config, "qwen_1bit_experts", False)
-    if type(one_bit) is not bool:
-        raise ValueError("qwen_1bit_experts must be a boolean")
-    if one_bit and getattr(config, "staged_expert_streaming", False):
-        raise ValueError("qwen_1bit_experts does not support staged expert streaming")
+    two_bit = getattr(config, "qwen_2bit_experts", False)
+    if type(two_bit) is not bool:
+        raise ValueError("qwen_2bit_experts must be a boolean")
+    percent = getattr(config, "qwen_2bit_expert_percent", 50)
+    if type(percent) is not int or not 0 <= percent <= 100:
+        raise ValueError("qwen_2bit_expert_percent must be an integer from 0 through 100")
+    if two_bit and percent > 0 and getattr(config, "staged_expert_streaming", False):
+        raise ValueError("qwen_2bit_experts does not support staged expert streaming")
     # Qwen ANE Prefill compiles the BF16 q_proj weights it finds at load.
     ane = getattr(config, "ane_prefill", False) and getattr(config, "ane_prefill_ratio", 0) > 0
     if common and ane:
@@ -114,9 +122,12 @@ def add_flash_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--qwen-8bit-common-tensors", action=argparse.BooleanOptionalAction,
                         default=False, help="store Qwen projections, lm_head and MTP included, as "
                         "affine 8-bit; output is not bit-identical")
-    parser.add_argument("--qwen-1bit-experts", action=argparse.BooleanOptionalAction,
-                        default=False, help="store routed Qwen experts in memory as affine 1-bit; "
+    parser.add_argument("--qwen-2bit-experts", action=argparse.BooleanOptionalAction,
+                        default=False, help="store part of each routed Qwen expert in memory as affine 2-bit; "
                         "installed expert files stay MXFP4; output is not bit-identical")
+    parser.add_argument("--qwen-2bit-expert-percent", type=int, default=50,
+                        help="0..100 percent of each expert matrix stored in 2 bits when "
+                        "--qwen-2bit-experts is set; 50 is the default; 0 keeps MXFP4")
 
 
 def _add_qsa_arguments(parser):
@@ -143,3 +154,73 @@ def _add_qsa_arguments(parser):
 
 def flash_arguments(arguments: argparse.Namespace) -> dict:
     return {name: getattr(arguments, name) for name in DEFAULTS}
+
+
+def resident_two_bit(config) -> tuple[bool, int]:
+    """Whether resident experts are compacted, and the share that identifies them.
+
+    A disabled setting or a 0% share keeps MXFP4, including its prompt cache.
+    """
+    enabled = getattr(config, "qwen_2bit_experts", False) is True
+    percent = getattr(config, "qwen_2bit_expert_percent", DEFAULTS["qwen_2bit_expert_percent"])
+    if type(percent) is not int or not 0 <= percent <= 100 or not enabled or percent <= 0:
+        return False, 0
+    return True, percent
+
+
+def expert_uses_two_bit(expert_id: int, expert_count: int, percent: int) -> bool:
+    """Whether this routed expert is one of the experts stored in 2 bits.
+
+    The share is spread across expert ids. 1% of 512 experts is 5 experts.
+    The others stay in the original format. 0% selects none and 100% selects
+    every expert.
+    """
+    if type(percent) is not int or not 0 <= percent <= 100:
+        raise ValueError("qwen_2bit_expert_percent must be an integer from 0 through 100")
+    if type(expert_id) is not int or type(expert_count) is not int or expert_count <= 0:
+        raise ValueError("expert id and expert count must be integers")
+    if percent <= 0 or not 0 <= expert_id < expert_count:
+        return False
+    if percent >= 100:
+        return True
+    quota = expert_count * percent // 100
+    if quota <= 0:
+        return False
+    return (expert_id * quota) % expert_count < quota
+
+
+def quantized_expert_columns(column_count: int, percent: int) -> int:
+    """Input columns stored in 2 bits.
+
+    Columns are whole groups of 64, rounded to the nearest group. A share above
+    0% keeps at least one group. 0% keeps the original matrix. 100% quantizes
+    every column. The counted columns start at the first input column.
+    """
+    if type(percent) is not int or not 0 <= percent <= 100:
+        raise ValueError("qwen_2bit_expert_percent must be an integer from 0 through 100")
+    if type(column_count) is not int or column_count < 0 or column_count % EXPERT_QUANT_GROUP:
+        raise ValueError(
+            f"2-bit expert weights need an input size multiple of {EXPERT_QUANT_GROUP}")
+    if percent <= 0 or column_count == 0:
+        return 0
+    groups = column_count // EXPERT_QUANT_GROUP
+    if percent >= 100:
+        return column_count
+    chosen = (groups * percent + 50) // 100
+    return min(groups, max(1, chosen)) * EXPERT_QUANT_GROUP
+
+
+def mxfp4_matrix_bytes(rows: int, columns: int) -> int:
+    """Packed MXFP4 weights plus one scale byte per group of 32."""
+    return rows * columns // 2 + rows * columns // _MXFP4_GROUP
+
+
+def two_bit_matrix_bytes(rows: int, columns: int, quantized_columns: int) -> int:
+    """2-bit prefix plus the MXFP4 columns that stay at the original precision."""
+    if not 0 <= quantized_columns <= columns or quantized_columns % EXPERT_QUANT_GROUP:
+        raise ValueError("quantized columns must be a group-aligned prefix of the matrix")
+    rest = columns - quantized_columns
+    quantized = 0 if quantized_columns == 0 else (
+        rows * quantized_columns // 4 + rows * (quantized_columns // EXPERT_QUANT_GROUP) * 4)
+    kept = 0 if rest == 0 else mxfp4_matrix_bytes(rows, rest)
+    return quantized + kept
