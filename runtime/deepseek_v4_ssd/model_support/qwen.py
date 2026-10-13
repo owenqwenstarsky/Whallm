@@ -34,10 +34,7 @@ class QwenSupport(ModelSupport):
                 model.mtp, model.mtp_expert_cache = _load_qwen_mtp(
                     installed, model.args, config, read_limiter,
                 )
-            if getattr(config, "qwen_1bit_common_tensors", False):
-                from .. import qwen_common_tensors
-                qwen_common_tensors.quantize_1bit_common_tensors(model)
-            elif getattr(config, "qwen_8bit_common_tensors", False):
+            if getattr(config, "qwen_8bit_common_tensors", False):
                 from .. import qwen_common_tensors
                 qwen_common_tensors.quantize_common_tensors(model)
             return model, cache

@@ -268,7 +268,7 @@ struct ModelAdvancedSettings: Codable, Equatable, Sendable {
   var qwenCompileTensorOps: Bool? = false
   var qwenPhaseMemory: Bool? = false
   var qwen8BitCommonTensors: Bool? = false
-  var qwen1BitCommonTensors: Bool? = false
+  var qwen1BitExperts: Bool? = false
   var qwenExpertWaveSlots: Int? = 0
   var qwenNgramIO: String? = "mmap"
   var qwenNgramCacheMiB: Int? = 0
@@ -342,7 +342,7 @@ struct ModelAdvancedSettings: Codable, Equatable, Sendable {
       // faster with the same graded results. Saved settings are unchanged.
       settings.prefetchReadWorkers = 8
       settings.qwen8BitCommonTensors = true
-      settings.qwen1BitCommonTensors = false
+      settings.qwen1BitExperts = false
     }
     // Every kind sends the runtime default for Qwen-only fields: non-Qwen
     // validation rejects any value that differs from the runtime default.
@@ -391,11 +391,7 @@ struct ModelAdvancedSettings: Codable, Equatable, Sendable {
     settings.mtpEnabled = descriptor.supports("mtp") ? (settings.mtpEnabled ?? false) : false
     settings.mtpSlots = settings.mtpSlots ?? 32
     let qwen = modelKind.usesQwenEngine
-    settings.qwen1BitCommonTensors = qwen ? (settings.qwen1BitCommonTensors ?? false) : false
-    // 1-bit replaces 8-bit. A saved file with both on keeps the 1-bit choice.
-    if settings.qwen1BitCommonTensors == true {
-      settings.qwen8BitCommonTensors = false
-    }
+    settings.qwen1BitExperts = qwen ? (settings.qwen1BitExperts ?? false) : false
     settings.qwen8BitCommonTensors = qwen ? (settings.qwen8BitCommonTensors ?? true) : false
     settings.qwenExpertWaveSlots = qwen ? (settings.qwenExpertWaveSlots ?? 0) : 0
     settings.qwenNgramIO = qwen ? (settings.qwenNgramIO ?? "mmap") : "mmap"
@@ -851,7 +847,7 @@ struct ModelCatalog: Codable, Equatable, Sendable {
       var qwenPrefillReadExperts: Int? = nil
       var qwenPrefillSeedExperts: Int? = nil
       var qwen8BitCommonTensors: Bool? = nil
-      var qwen1BitCommonTensors: Bool? = nil
+      var qwen1BitExperts: Bool? = nil
       var qwenQSASelectedKernel: Bool? = nil
       let qwenMTPDraftTokens: Int
       let qwenMTPZeroAcceptanceLimit: Int
@@ -920,7 +916,7 @@ struct ModelCatalog: Codable, Equatable, Sendable {
         case qwenPrefillReadExperts = "qwen_prefill_read_experts"
         case qwenPrefillSeedExperts = "qwen_prefill_seed_experts"
         case qwen8BitCommonTensors = "qwen_8bit_common_tensors"
-        case qwen1BitCommonTensors = "qwen_1bit_common_tensors"
+        case qwen1BitExperts = "qwen_1bit_experts"
         case qwenQSASelectedKernel = "qwen_qsa_selected_kernel"
         case qwenMTPDraftTokens = "qwen_mtp_draft_tokens"
         case qwenMTPZeroAcceptanceLimit = "qwen_mtp_zero_acceptance_limit"
@@ -956,7 +952,7 @@ struct ModelCatalog: Codable, Equatable, Sendable {
         try values.encode(qwenPrefillReadExperts ?? 1, forKey: .qwenPrefillReadExperts)
         try values.encode(qwenPrefillSeedExperts ?? 0, forKey: .qwenPrefillSeedExperts)
         try values.encode(qwen8BitCommonTensors ?? false, forKey: .qwen8BitCommonTensors)
-        try values.encode(qwen1BitCommonTensors ?? false, forKey: .qwen1BitCommonTensors)
+        try values.encode(qwen1BitExperts ?? false, forKey: .qwen1BitExperts)
         try values.encode(qwenQSASelectedKernel ?? false, forKey: .qwenQSASelectedKernel)
         try values.encode(qwenMTPDraftTokens, forKey: .qwenMTPDraftTokens)
         try values.encode(qwenMTPZeroAcceptanceLimit, forKey: .qwenMTPZeroAcceptanceLimit)

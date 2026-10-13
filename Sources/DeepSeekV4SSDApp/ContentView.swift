@@ -2027,8 +2027,8 @@ struct ModelAdvancedView: View {
             toggleField(QwenFlashCopy.commonTensors, hint: QwenFlashCopy.commonTensorsHint,
               value: qwen8BitResidentWeights)
             Divider()
-            toggleField(QwenFlashCopy.oneBitTensors, hint: QwenFlashCopy.oneBitTensorsHint,
-              value: qwen1BitResidentWeights)
+            toggleField(QwenFlashCopy.oneBitExperts, hint: QwenFlashCopy.oneBitExpertsHint,
+              value: qwen1BitExperts)
           }
           if modelKind.descriptor.editableSettings.contains("kvCachePrecision") {
             Divider()
@@ -2298,20 +2298,14 @@ struct ModelAdvancedView: View {
   private var qwen8BitResidentWeights: Binding<Bool> {
     Binding(
       get: { settings.qwen8BitCommonTensors ?? true },
-      set: { enabled in
-        settings.qwen8BitCommonTensors = enabled
-        if enabled { settings.qwen1BitCommonTensors = false }
-      }
+      set: { settings.qwen8BitCommonTensors = $0 }
     )
   }
 
-  private var qwen1BitResidentWeights: Binding<Bool> {
+  private var qwen1BitExperts: Binding<Bool> {
     Binding(
-      get: { settings.qwen1BitCommonTensors ?? false },
-      set: { enabled in
-        settings.qwen1BitCommonTensors = enabled
-        if enabled { settings.qwen8BitCommonTensors = false }
-      }
+      get: { settings.qwen1BitExperts ?? false },
+      set: { settings.qwen1BitExperts = $0 }
     )
   }
 

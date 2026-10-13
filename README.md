@@ -66,10 +66,10 @@ Added in 1.1.10.
 
 ### Settings
 
-- Both Qwen models show the same short **Advanced Settings**: Alias, generation, memory, read workers, Prompt Cache, warmup, MTP, 8-bit resident weights and 1-bit resident weights. Everything else uses fixed values.
+- Both Qwen models show the same short **Advanced Settings**: Alias, generation, memory, read workers, Prompt Cache, warmup, MTP, 8-bit resident weights and 1-bit expert weights. Everything else uses fixed values.
 - MTP is on by default. It usually speeds up output, but not for every prompt. Output can differ slightly from output with MTP off.
 - **Use 8-bit resident weights** is on by default for new or reset settings; saved settings keep their choice. It keeps the weights that stay in memory, except experts, in 8 bits instead of BF16. This uses less memory and usually speeds up output, most with MTP on. Output can differ slightly from output with the setting off.
-- **Use 1-bit resident weights** is off by default. It stores those same weights in 1 bit instead of BF16 and turns 8-bit resident weights off. It uses less memory than 8-bit weights. Generated text can change, and output can be slower.
+- **Use 1-bit expert weights** is off by default. After a routed expert is read into memory, that copy is stored in 1 bit. Installed expert files stay unchanged. Loaded experts use less memory. Generated text can change, and output can be slower.
 
 ### Images
 

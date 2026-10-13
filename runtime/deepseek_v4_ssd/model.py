@@ -97,8 +97,8 @@ class RuntimeConfig:
     qwen_phase_memory: bool = False
     # App setting, on for new Qwen settings: projections in 8 bits (qwen_common_tensors.py).
     qwen_8bit_common_tensors: bool = False
-    # App setting, off unless chosen: the same projections in 1 bit. Not combined with 8-bit.
-    qwen_1bit_common_tensors: bool = False
+    # App setting, off unless chosen: resident routed experts in 1 bit (qwen_expert_1bit.py).
+    qwen_1bit_experts: bool = False
     qwen_expert_wave_slots: int = 0
     qwen_ngram_io: str = "mmap"
     qwen_ngram_cache_bytes: int = 0
@@ -1062,6 +1062,7 @@ def _load_qwen_mtp(
         file_cache_policy=config.expert_file_cache_policy,
         separate_prefill_io=getattr(config, "separate_prefill_io", True),
         eviction_policy=config.expert_eviction_policy,
+        one_bit_experts=getattr(config, "qwen_1bit_experts", False) is True,
     )
     try:
         model = MTPModel(args, expert_cache)
@@ -1072,7 +1073,9 @@ def _load_qwen_mtp(
         model.load_weights(list(model.sanitize(weights).items()), strict=True)
         # The QSA controls apply to the native draft head and to the target alike,
         # because the configured defaults are the shipped attention path.
+        one_bit = getattr(config, "qwen_1bit_experts", False) is True
         for layer in model.layers:
+            layer.mlp.experts.one_bit = one_bit
             attention = getattr(layer, "self_attn", None)
             if attention is not None:
                 attention.query_chunk = getattr(config, "qwen_qsa_query_chunk", 16)

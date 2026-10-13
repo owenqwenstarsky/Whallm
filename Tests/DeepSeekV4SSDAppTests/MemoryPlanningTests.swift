@@ -671,42 +671,36 @@ final class MemoryPlanningTests: XCTestCase {
     XCTAssertEqual(on.loading.total, off.loading.total)
   }
 
-  func test1BitResidentWeightsKeepThreeThirtySecondsAndRestoreAChunk() throws {
-    let shapes: [(String, [Int])] = [
-      ("lm_head.weight", [248_320, 2_560]),
-      ("model.language_model.layers.0.self_attn.q_proj.weight", [12_288, 2_560]),
-      ("model.language_model.layers.0.mlp.shared_expert.up_proj.weight", [640, 2_560]),
-      ("model.language_model.embed_tokens.weight", [248_320, 2_560]),
-      ("model.language_model.layers.0.mlp.gate.weight", [512, 2_560]),
-      ("model.language_model.layers.0.linear_attn.in_proj_a.weight", [48, 2_560])]
-    func tensors(_ list: [(String, [Int])]) throws -> [InstalledTensor] {
-      try JSONDecoder().decode([InstalledTensor].self, from: JSONSerialization.data(withJSONObject:
-        list.map { ["name": $0.0, "dtype": "BF16", "shape": $0.1, "offset": 0, "length": $0.1.reduce(2, *)] }))
-    }
-    let draft = [("mtp.layers.0.self_attn.o_proj.weight", [2_560, 6_144])]
-    let p = try profile(common: tensors(shapes), mtp: tensors(draft))
+  func test1BitExpertWeightsKeepSixSeventeenthsAndRestoreOneMatrix() throws {
+    let p = try profile()
     var s = ModelAdvancedSettings.defaults(for: .qwen3_8FlashNext)
     s.qwen8BitCommonTensors = false
     s.mtpEnabled = false
+    s.layerMajorPrefill = true
+    s.batchedExpertPrefill = true
+    s.qwenPrefillSeedExperts = 0
+    s.expertCacheGiB = ExpertMemory.exactGiB(slots: 100, blobBytes: 2_611_200)
     func estimate(_ on: Bool) throws -> MemoryEstimate {
-      s.qwen1BitCommonTensors = on
+      s.qwen1BitExperts = on
       return try XCTUnwrap(p.estimate(s, mtpAvailable: true, dsparkAvailable: false))
     }
-    let lmHead = 248_320.0 * 2_560 * 2, qProj = 12_288.0 * 2_560 * 2, up = 640.0 * 2_560 * 2
-    let saved = (lmHead + qProj + up) * 29 / 32
-    let chunk = 4_096.0 * 2_560 * 2
+    let saved = Double(100 * 2_611_200) * 11 / 17
+    let restored = 4.0 * 640 * 2_560
     let off = try estimate(false), on = try estimate(true)
     XCTAssertEqual(off.decoding.model - on.decoding.model, saved, accuracy: 1)
-    XCTAssertEqual(off.prefill.model - on.prefill.model, saved, accuracy: 1)
+    XCTAssertEqual(on.prefill.model, off.prefill.model, accuracy: 1)
     XCTAssertEqual(on.loading.total, off.loading.total)
-    XCTAssertEqual(on.prefill.temporary - off.prefill.temporary, chunk, accuracy: 1)
-    XCTAssertEqual(on.decoding.temporary - off.decoding.temporary, chunk, accuracy: 1)
+    XCTAssertEqual(on.prefill.temporary - off.prefill.temporary, restored, accuracy: 1)
+    XCTAssertEqual(on.decoding.temporary - off.decoding.temporary, restored, accuracy: 1)
+    s.batchedExpertPrefill = false
+    let offSlots = try estimate(false), onSlots = try estimate(true)
+    XCTAssertEqual(offSlots.prefill.model - onSlots.prefill.model, saved, accuracy: 1)
+    s.batchedExpertPrefill = true
     s.mtpEnabled = true
-    let oProj = 2_560.0 * 6_144 * 2
+    s.mtpCacheGiB = ExpertMemory.exactGiB(slots: 20, blobBytes: 2_611_200)
     let offMTP = try estimate(false), onMTP = try estimate(true)
-    XCTAssertEqual(offMTP.decoding.auxiliary - onMTP.decoding.auxiliary, oProj * 29 / 32, accuracy: 1)
-    // The MTP projection is smaller than 4,096 rows, so decode restores all of it.
-    XCTAssertEqual(onMTP.decoding.temporary - offMTP.decoding.temporary, oProj, accuracy: 1)
+    XCTAssertEqual(offMTP.decoding.auxiliary - onMTP.decoding.auxiliary,
+      Double(20 * 2_611_200) * 11 / 17, accuracy: 1)
     XCTAssertEqual(onMTP.loading.total, offMTP.loading.total)
   }
 
