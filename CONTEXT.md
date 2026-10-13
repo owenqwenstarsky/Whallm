@@ -51,7 +51,10 @@ prefill, masked QSA prefill and the selected-block QSA kernel on. Prompt chunks 
 the selected-block kernel, which reads only the key blocks QSA selected. Shorter
 calls, including Decode and MTP verification, use the gathered QSA path. New or
 reset Qwen settings also turn on 8-bit resident weights and split each whole-layer
-Prefill read into 8 jobs; saved settings keep their values.
+Prefill read into 8 jobs; saved settings keep their values. **Use 1-bit resident
+weights** is off unless the user turns it on. It packs those same projections
+into affine 1-bit groups of 64 and turns 8-bit resident weights off. Prompt
+caches for BF16, 8-bit and 1-bit weights stay separate.
 
 Both Qwen model kinds accept still images through App Chat and the Chat/Responses
 APIs. Each installation includes its own pinned `vision/common.bin` (897,864,704

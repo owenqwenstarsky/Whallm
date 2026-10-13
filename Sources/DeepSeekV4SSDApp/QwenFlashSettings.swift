@@ -54,6 +54,9 @@ enum QwenFlashCopy {
   static let invalidSeeds = "Warm decode experts per layer must be an integer from 0 to 128."
   static let commonTensors = "Use 8-bit resident weights"
   static let commonTensorsHint = "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change."
+  static let oneBitTensors = "Use 1-bit resident weights"
+  static let oneBitTensorsHint = "Stores the model weights that stay in memory, except experts, in 1 bit instead of BF16. Uses less memory than 8-bit weights and turns those off. Generated text may change, and output can be slower."
   static let allKeys = [wavesConflict, invalidWaves, invalidBackend, invalidCache,
-    invalidQueryChunk, invalidReadBatch, invalidSeeds, commonTensors, commonTensorsHint]
+    invalidQueryChunk, invalidReadBatch, invalidSeeds, commonTensors, commonTensorsHint,
+    oneBitTensors, oneBitTensorsHint]
 }

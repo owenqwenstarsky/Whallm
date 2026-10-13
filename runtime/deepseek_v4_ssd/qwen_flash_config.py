@@ -20,6 +20,7 @@ DEFAULTS = {
     "qwen_qsa_masked_prefill": False,
     "qwen_qsa_selected_kernel": False,
     "qwen_8bit_common_tensors": False,
+    "qwen_1bit_common_tensors": False,
 }
 
 
@@ -68,9 +69,17 @@ def validate_flash_config(config) -> None:
     common = getattr(config, "qwen_8bit_common_tensors", False)
     if type(common) is not bool:
         raise ValueError("qwen_8bit_common_tensors must be a boolean")
+    one_bit = getattr(config, "qwen_1bit_common_tensors", False)
+    if type(one_bit) is not bool:
+        raise ValueError("qwen_1bit_common_tensors must be a boolean")
+    if one_bit and common:
+        raise ValueError("qwen_1bit_common_tensors cannot be combined with qwen_8bit_common_tensors")
     # Qwen ANE Prefill compiles the BF16 q_proj weights it finds at load.
-    if common and getattr(config, "ane_prefill", False) and getattr(config, "ane_prefill_ratio", 0) > 0:
+    ane = getattr(config, "ane_prefill", False) and getattr(config, "ane_prefill_ratio", 0) > 0
+    if common and ane:
         raise ValueError("qwen_8bit_common_tensors does not support ANE Prefill")
+    if one_bit and ane:
+        raise ValueError("qwen_1bit_common_tensors does not support ANE Prefill")
     threshold = getattr(config, "qwen_qsa_dense_threshold", 0)
     if type(threshold) is not int or not 0 <= threshold <= 262_144:
         raise ValueError("qwen_qsa_dense_threshold must be an integer from 0 through 262144")
@@ -107,6 +116,9 @@ def add_flash_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--qwen-8bit-common-tensors", action=argparse.BooleanOptionalAction,
                         default=False, help="store Qwen projections, lm_head and MTP included, as "
                         "affine 8-bit; output is not bit-identical")
+    parser.add_argument("--qwen-1bit-common-tensors", action=argparse.BooleanOptionalAction,
+                        default=False, help="store those same Qwen projections as affine 1-bit; "
+                        "not combined with 8-bit; output is not bit-identical")
 
 
 def _add_qsa_arguments(parser):

@@ -235,6 +235,17 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
+def _qwen_common_tensor_contract(config) -> dict:
+    """Separate prompt caches for BF16, 8-bit and 1-bit resident weights."""
+    if getattr(config, "qwen_1bit_common_tensors", False):
+        value = "affine1-group64-v1"
+    elif getattr(config, "qwen_8bit_common_tensors", False):
+        value = "affine8-group64-v1"
+    else:
+        return {}
+    return {"qwenCommonTensors": value}
+
+
 def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> dict:
     """Return every model/runtime input that can change target KV semantics."""
     raw_config: dict[str, Any] = {}
@@ -280,8 +291,7 @@ def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> 
         **({"qwenQSAMaskedPrefill": "sdpa-v2-max65536"} if getattr(config, "qwen_qsa_masked_prefill", False) else {}),
         **({"qwenQSASelectedKernel": "metal-v1-min16384"}
            if getattr(config, "qwen_qsa_selected_kernel", False) else {}),
-        **({"qwenCommonTensors": "affine8-group64-v1"}
-           if getattr(config, "qwen_8bit_common_tensors", False) else {}),
+        **_qwen_common_tensor_contract(config),
         "modelConfigSHA256": _sha256_json(raw_config),
         "rope": {key: raw_config.get(key) for key in rope_keys},
         "kvFormat": {

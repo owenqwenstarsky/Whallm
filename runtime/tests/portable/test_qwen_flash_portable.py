@@ -258,6 +258,24 @@ class FlashConfigTests(unittest.TestCase):
         settings.validate_flash_config(SimpleNamespace(qwen_expert_wave_slots=512,
             qwen_ngram_io="pread", qwen_ngram_cache_bytes=512 * 1024**2))
 
+    def test_one_bit_resident_weights_are_off_exclusive_and_reject_ane(self):
+        self.assertIs(settings.DEFAULTS["qwen_1bit_common_tensors"], False)
+        parser = argparse.ArgumentParser()
+        settings.add_flash_arguments(parser)
+        self.assertIs(settings.flash_arguments(parser.parse_args([]))["qwen_1bit_common_tensors"], False)
+        enabled = settings.flash_arguments(parser.parse_args(["--qwen-1bit-common-tensors"]))
+        self.assertIs(enabled["qwen_1bit_common_tensors"], True)
+        self.assertIs(enabled["qwen_8bit_common_tensors"], False)
+        settings.validate_flash_config(SimpleNamespace(**{**settings.DEFAULTS,
+                                                          "qwen_1bit_common_tensors": True}))
+        for changes in (
+            {"qwen_1bit_common_tensors": 1},
+            {"qwen_1bit_common_tensors": True, "qwen_8bit_common_tensors": True},
+            {"qwen_1bit_common_tensors": True, "ane_prefill": True, "ane_prefill_ratio": 0.5},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                settings.validate_flash_config(SimpleNamespace(**{**settings.DEFAULTS, **changes}))
+
 
 if __name__ == "__main__":
     unittest.main()
