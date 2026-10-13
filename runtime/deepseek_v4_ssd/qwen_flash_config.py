@@ -168,6 +168,27 @@ def resident_two_bit(config) -> tuple[bool, int]:
     return True, percent
 
 
+def expert_uses_two_bit(expert_id: int, expert_count: int, percent: int) -> bool:
+    """Whether this routed expert is one of the experts stored in 2 bits.
+
+    The share is spread across expert ids. 1% of 512 experts is 5 experts.
+    The others stay in the original format. 0% selects none and 100% selects
+    every expert.
+    """
+    if type(percent) is not int or not 0 <= percent <= 100:
+        raise ValueError("qwen_2bit_expert_percent must be an integer from 0 through 100")
+    if type(expert_id) is not int or type(expert_count) is not int or expert_count <= 0:
+        raise ValueError("expert id and expert count must be integers")
+    if percent <= 0 or not 0 <= expert_id < expert_count:
+        return False
+    if percent >= 100:
+        return True
+    quota = expert_count * percent // 100
+    if quota <= 0:
+        return False
+    return (expert_id * quota) % expert_count < quota
+
+
 def quantized_expert_columns(column_count: int, percent: int) -> int:
     """Input columns stored in 2 bits.
 

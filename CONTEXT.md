@@ -53,11 +53,10 @@ calls, including Decode and MTP verification, use the gathered QSA path. New or
 reset Qwen settings also turn on 8-bit resident weights and split each whole-layer
 Prefill read into 8 jobs; saved settings keep their values. **Use 2-bit expert
 weights** is off unless the user turns it on. When it is on, the default share
-is 50%. After a routed expert is read into memory, that share of each matrix in
-the copy is stored as affine 2-bit groups of 64, starting at the first input
-columns and rounded to a whole group. A share above 0% keeps at least one group.
-The rest of the copy stays MXFP4. Installed expert files stay MXFP4. Common
-tensors are unchanged. Prompt caches for MXFP4 and each 2-bit share stay separate.
+is 50%. That share of routed experts is stored in memory as affine 2-bit groups
+of 64 after each one is read. The other experts stay MXFP4. Installed expert
+files stay MXFP4. Common tensors are unchanged. Prompt caches for MXFP4 and each
+2-bit share stay separate.
 
 Both Qwen model kinds accept still images through App Chat and the Chat/Responses
 APIs. Each installation includes its own pinned `vision/common.bin` (897,864,704

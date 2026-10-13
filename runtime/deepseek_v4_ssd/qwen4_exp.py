@@ -25,7 +25,7 @@ from .qwen_expert_2bit import (
     expert_from_batched,
     quantize_qwen_expert,
 )
-from .qwen_flash_config import resident_two_bit
+from .qwen_flash_config import expert_uses_two_bit, resident_two_bit
 from .io_metrics import request_rows
 from .manifest import InstalledModel, NGram
 # Kept as module-level names for existing callers and checkpoint-contract tests.
@@ -814,11 +814,8 @@ class StreamingExperts(nn.Module):
         self.two_bit_percent = 50
 
     def _one(self, value: mx.array, weights) -> mx.array:
-        if self.two_bit:
-            if isinstance(weights, QwenExpertWeights):
-                weights = quantize_qwen_expert(weights, self.two_bit_percent)
-            if isinstance(weights, TwoBitQwenExpert):
-                return apply_two_bit_expert(value, weights)
+        if isinstance(weights, TwoBitQwenExpert):
+            return apply_two_bit_expert(value, weights)
         projected = _qmm(value, weights.gate_up, weights.gate_up_scales)
         gate, up = mx.split(projected, 2, axis=-1)
         return _qmm(nn.silu(gate) * up, weights.down, weights.down_scales)
@@ -933,7 +930,10 @@ class StreamingExperts(nn.Module):
                 continue
             expert = int(flat[positions[0]])
             source = mx.take(flat_value, mx.array(positions // selected.shape[-1]), axis=0)
-            outputs.append(self._one(source, expert_from_batched(batched, expert)))
+            weights = expert_from_batched(batched, expert)
+            if expert_uses_two_bit(expert, self.cache.model.expert_count, self.two_bit_percent):
+                weights = quantize_qwen_expert(weights, 100)
+            outputs.append(self._one(source, weights))
         grouped = mx.concatenate(outputs, axis=0)
         restored = mx.take(grouped, mx.array(np.argsort(order)), axis=0)
         return restored.reshape(*selected.shape, -1)

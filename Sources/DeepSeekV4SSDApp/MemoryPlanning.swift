@@ -251,12 +251,11 @@ struct MemoryPlanningProfile {
     // Resident-weight repacking happens after loading, so loading still holds BF16.
     // 8-bit keeps values plus BF16 scales and biases per 64: 17/32 of BF16.
     // 8-bit restores a whole weight only for products of more than 16 rows.
-    // 2-bit experts replace part of the retained MXFP4 slot after the read.
-    // A fully quantized matrix is 10/17 of its blob (2-bit group 64 versus
-    // MXFP4 group 32), so share S keeps 1 - S * 7/17. The runtime rounds each
-    // matrix to groups of 64. Whole-layer prefill still stages the installed
-    // blobs. Each product restores the quantized columns of gate_up, the larger
-    // matrix (2 * intermediate * hidden, BF16, times the share).
+    // The chosen share of resident experts is stored entirely in 2 bits after
+    // the read. One fully quantized matrix is 10/17 of its MXFP4 blob, so share
+    // S keeps 1 - S * 7/17. The other experts stay MXFP4. Whole-layer prefill
+    // still stages the installed blobs. A 2-bit product restores one whole
+    // gate_up matrix (2 * intermediate * hidden, BF16) and then drops it.
     let repacked = qwen && s.qwen8BitCommonTensors == true
     let droppedShare = 15.0
     let twoBitShare = qwen && s.qwen2BitExperts == true
@@ -341,7 +340,7 @@ struct MemoryPlanningProfile {
     let prefillWeights = (repackedMain + repackedMTP)
       .filter { !layerMajor || $0.name != "lm_head.weight" }
     let restoredWeight = step > 16 ? restoredBytes(prefillWeights) : 0
-    let restoredExpert = twoBitShare * 4 * intermediate * hidden
+    let restoredExpert = twoBitShare > 0 ? 4 * intermediate * hidden : 0
     let prefillWork = max(attentionWork(step), moeWork(moeStep), logits) + cache.growth + restoredWeight + restoredExpert
     // Each layer-major chunk retains one SharedState. Its arrays use that
     // chunk's visible history, not the final cache's reserved capacity.

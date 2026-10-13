@@ -1,14 +1,13 @@
-"""In-memory affine 2-bit copies of part of each Qwen routed expert.
+"""In-memory affine 2-bit copies of selected Qwen routed experts.
 
-Installed expert files stay MXFP4. After a blob is read into a slot, the cache
-keeps this smaller copy and releases the MXFP4 buffer. The configured percentage
-selects a prefix of each matrix, in groups of 64 input columns, rounded to the
-nearest group. A share above 0% quantizes at least one group. The remaining
-columns stay MXFP4. Products have no 2-bit kernel, so each one restores the
-quantized prefix, multiplies, and drops that copy before the MXFP4 tail. A group
-stores its minimum as a BF16 bias, the gap to its maximum as a BF16 scale, and
-two bits per weight. Equal values store zeros and a zero scale. Output tokens
-can differ from the MXFP4 expert.
+Installed expert files stay MXFP4. The runtime quantizes a share of expert ids
+and leaves the others in their original slots. After a selected blob is read
+into a slot, the cache keeps this smaller copy and releases the MXFP4 buffer.
+Products have no 2-bit kernel, so each one restores one matrix, multiplies, and
+drops that copy before the next matrix. A group stores its minimum as a BF16
+bias, the gap to its maximum as a BF16 scale, and two bits per weight. Equal
+values store zeros and a zero scale. Output tokens can differ from the MXFP4
+expert.
 """
 from __future__ import annotations
 

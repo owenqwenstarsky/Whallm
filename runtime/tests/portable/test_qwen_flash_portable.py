@@ -289,6 +289,14 @@ class FlashConfigTests(unittest.TestCase):
                 settings.validate_flash_config(SimpleNamespace(**{**settings.DEFAULTS, **changes}))
 
     def test_two_bit_share_rounds_to_groups_and_saves_seven_seventeenths(self):
+        for percent in (0, 1, 50, 100):
+            chosen = [i for i in range(512) if settings.expert_uses_two_bit(i, 512, percent)]
+            if percent == 0:
+                self.assertEqual(chosen, [])
+            elif percent == 100:
+                self.assertEqual(len(chosen), 512)
+            else:
+                self.assertEqual(len(chosen), 512 * percent // 100)
         self.assertEqual(settings.quantized_expert_columns(2560, 0), 0)
         self.assertEqual(settings.quantized_expert_columns(2560, 1), 64)
         self.assertEqual(settings.quantized_expert_columns(2560, 50), 1280)

@@ -473,9 +473,12 @@ class _SlotPool:
                 if self._views[slot] is None and array is not None:
                     self._views[slot] = memoryview(array)
 
-    def select_individual(self, slots: list[int]) -> tuple[ExpertWeights, ...]:
+    def select_individual(self, slots: list[int], expert_ids: list[int] | None = None):
         if self._two_bit_experts:
-            return self._select_two_bit(slots)
+            return self._select_two_bit(slots, expert_ids)
+        return self._select_mxfp4(slots)
+
+    def _select_mxfp4(self, slots: list[int]):
         weights = []
         for slot in slots:
             array = self._slots[slot]
@@ -493,12 +496,22 @@ class _SlotPool:
             weights.append(views[shift])
         return tuple(weights)
 
-    def _select_two_bit(self, slots: list[int]):
-        """Keep the mixed 2-bit expert and drop the MXFP4 slot it was read into."""
+    def _select_two_bit(self, slots: list[int], expert_ids: list[int] | None):
+        """Store only the selected experts in 2 bits. The rest keep their MXFP4 slot."""
         from .qwen_expert_2bit import TwoBitQwenExpert, quantize_qwen_expert
-        weights = []
+        from .qwen_flash_config import expert_uses_two_bit
+        if expert_ids is not None and len(expert_ids) != len(slots):
+            raise ValueError("2-bit expert ids must match the selected slots")
+        weights: list = [None] * len(slots)
+        plain_slots = []
         compacted = False
-        for slot in slots:
+        for index, slot in enumerate(slots):
+            expert = None if expert_ids is None else expert_ids[index]
+            selected = expert is not None and expert_uses_two_bit(
+                expert, self._model.expert_count, self._two_bit_percent)
+            if not selected:
+                plain_slots.append((index, slot))
+                continue
             held = self._two_bit[slot]
             if held is None:
                 array = self._slots[slot]
@@ -507,16 +520,21 @@ class _SlotPool:
                 shift = self._shifts[slot]
                 mxfp4 = self._layout.individual(
                     [array], lambda packed, name: self._array(packed, name, shift))[0]
-                held = quantize_qwen_expert(mxfp4, self._two_bit_percent)
-                if isinstance(held, TwoBitQwenExpert):
-                    del mxfp4
-                    self._two_bit[slot] = held
-                    self._slot_weights[slot] = None
-                    self._views[slot] = None
-                    self._slots[slot] = None
-                    self._shifts[slot] = 0
-                    compacted = True
-            weights.append(held)
+                held = quantize_qwen_expert(mxfp4, 100)
+                if not isinstance(held, TwoBitQwenExpert):
+                    raise RuntimeError("2-bit expert quantization did not replace the MXFP4 weights")
+                del mxfp4
+                self._two_bit[slot] = held
+                self._slot_weights[slot] = None
+                self._views[slot] = None
+                self._slots[slot] = None
+                self._shifts[slot] = 0
+                compacted = True
+            weights[index] = held
+        if plain_slots:
+            plain = self._select_mxfp4([slot for _, slot in plain_slots])
+            for (index, _), weight in zip(plain_slots, plain):
+                weights[index] = weight
         if compacted:
             mx.clear_cache()
         return tuple(weights)
@@ -727,7 +745,7 @@ class _StagedSlotPool(_SlotPool):
             w13_scales=self._array_from(w13, self._w13_regions["w13.scale"]),
         )
 
-    def select_individual(self, slots: list[int]) -> tuple[ExpertWeights, ...]:
+    def select_individual(self, slots: list[int], expert_ids: list[int] | None = None):
         return tuple(self._weights(slot, require_loaded=True) for slot in slots)
 
     def select_staged_individual(
@@ -1496,7 +1514,9 @@ class ExpertCache:
                 self.metrics.prefill_seed_bytes += len(assigned) * self.model.expert_blob_size
                 self.metrics.prefill_seed_seconds += time.perf_counter() - started
             if self.two_bit_experts:
-                self._pool.select_individual(list(assigned.values()))
+                seeded = list(assigned)
+                self._pool.select_individual(
+                    [assigned[expert] for expert in seeded], seeded)
         except BaseException:
             with self._lock:
                 self._release_slots(layer, assigned)
@@ -1582,7 +1602,8 @@ class ExpertCache:
             pack_started = time.perf_counter()
             main_experts = [*resident, *missing]
             main_weights = self._pool.select_individual(
-                [self._entries[(layer, expert)].slot for expert in main_experts]
+                [self._entries[(layer, expert)].slot for expert in main_experts],
+                main_experts,
             )
             self.metrics.pack_seconds += time.perf_counter() - pack_started
             weights_by_expert = dict(zip(main_experts, main_weights))
@@ -1653,7 +1674,7 @@ class ExpertCache:
             # Closing while yielding a cache hit must also drain missing reads.
             for expert, slot in resident:
                 pack_started = time.perf_counter()
-                weights = self._pool.select_individual([slot])[0]
+                weights = self._pool.select_individual([slot], [expert])[0]
                 with self._lock:
                     self.metrics.pack_seconds += time.perf_counter() - pack_started
                 yield expert, weights
@@ -1671,7 +1692,7 @@ class ExpertCache:
                     slot = assigned[expert]
                     self._pool.mark_loaded(slot)
                     pack_started = time.perf_counter()
-                    weights = self._pool.select_individual([slot])[0]
+                    weights = self._pool.select_individual([slot], [expert])[0]
                     self.metrics.pack_seconds += time.perf_counter() - pack_started
                 yield expert, weights
         finally:

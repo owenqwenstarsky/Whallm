@@ -58,9 +58,9 @@ enum QwenFlashCopy {
   static let commonTensors = "Use 8-bit resident weights"
   static let commonTensorsHint = "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change."
   static let twoBitExperts = "Use 2-bit expert weights"
-  static let twoBitExpertsHint = "After a routed expert is read into memory, stores the chosen share of that copy in 2 bits and keeps the rest in its original format. Installed expert files stay unchanged. A larger share uses less memory for loaded experts. Generated text may change, and output can be slower."
+  static let twoBitExpertsHint = "Stores this percentage of routed experts in 2 bits after they are read into memory. The other experts stay in their original format. Installed expert files stay unchanged. A larger share uses less memory. Generated text may change, and output can be slower."
   static let twoBitShare = "Expert weights in 2 bits"
-  static let twoBitShareHint = "Percentage of each loaded expert stored in 2 bits, in groups of 64 input columns from the first column. The default is 50%. 0% keeps the original weights. 100% stores the whole expert in 2 bits."
+  static let twoBitShareHint = "Percentage of routed experts stored in 2 bits. The default is 50%. 0% keeps every expert in its original format. 100% stores every routed expert in 2 bits."
   static let invalidTwoBitShare = "2-bit expert share must be an integer from 0 to 100."
   static let allKeys = [wavesConflict, invalidWaves, invalidBackend, invalidCache,
     invalidQueryChunk, invalidReadBatch, invalidSeeds, commonTensors, commonTensorsHint,

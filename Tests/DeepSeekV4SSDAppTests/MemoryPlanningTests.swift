@@ -695,7 +695,7 @@ final class MemoryPlanningTests: XCTestCase {
     XCTAssertEqual(none.decoding.model, off.decoding.model, accuracy: 1)
     XCTAssertEqual(half.prefill.model, off.prefill.model, accuracy: 1)
     XCTAssertEqual(half.loading.total, off.loading.total)
-    XCTAssertEqual(half.prefill.temporary - off.prefill.temporary, 0.5 * 4 * 640 * 2_560, accuracy: 1)
+    XCTAssertEqual(half.prefill.temporary - off.prefill.temporary, 4 * 640 * 2_560, accuracy: 1)
     XCTAssertEqual(full.decoding.temporary - off.decoding.temporary, 4 * 640 * 2_560, accuracy: 1)
     XCTAssertEqual(none.prefill.temporary, off.prefill.temporary, accuracy: 1)
     s.batchedExpertPrefill = false
