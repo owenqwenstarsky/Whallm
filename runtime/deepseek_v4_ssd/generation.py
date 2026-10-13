@@ -235,6 +235,20 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
 
 
+def _qwen_common_tensor_contract(config) -> dict:
+    """Separate prompt caches for BF16 and 8-bit resident projections."""
+    if getattr(config, "qwen_8bit_common_tensors", False):
+        return {"qwenCommonTensors": "affine8-group64-v1"}
+    return {}
+
+
+def _qwen_expert_weight_contract(config) -> dict:
+    """Separate prompt caches when resident experts are affine 1-bit."""
+    if getattr(config, "qwen_1bit_experts", False):
+        return {"qwenExpertWeights": "affine1-group64-v1"}
+    return {}
+
+
 def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> dict:
     """Return every model/runtime input that can change target KV semantics."""
     raw_config: dict[str, Any] = {}
@@ -280,8 +294,8 @@ def _prompt_cache_contract(installed: InstalledModel, config: RuntimeConfig) -> 
         **({"qwenQSAMaskedPrefill": "sdpa-v2-max65536"} if getattr(config, "qwen_qsa_masked_prefill", False) else {}),
         **({"qwenQSASelectedKernel": "metal-v1-min16384"}
            if getattr(config, "qwen_qsa_selected_kernel", False) else {}),
-        **({"qwenCommonTensors": "affine8-group64-v1"}
-           if getattr(config, "qwen_8bit_common_tensors", False) else {}),
+        **_qwen_common_tensor_contract(config),
+        **_qwen_expert_weight_contract(config),
         "modelConfigSHA256": _sha256_json(raw_config),
         "rope": {key: raw_config.get(key) for key in rope_keys},
         "kvFormat": {

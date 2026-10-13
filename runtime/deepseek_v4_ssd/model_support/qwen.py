@@ -25,7 +25,7 @@ class QwenSupport(ModelSupport):
         from ..model import _load_qwen_mtp
         model, cache = load(installed, config, raw_config, weights, read_limiter)
         # The model holds the loaded arrays now; without this reference each
-        # BF16 projection is freed as soon as its 8-bit form replaces it.
+        # BF16 projection is freed as soon as its packed form replaces it.
         del weights
         model.mtp = None
         model.mtp_expert_cache = None

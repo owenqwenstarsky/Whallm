@@ -19,6 +19,7 @@ from mlx_lm.models.rope_utils import initialize_rope
 from mlx_lm.models.switch_layers import _gather_sort, _scatter_unsort
 
 from .expert_cache import ExpertCache, QwenBatchedExperts, QwenExpertWeights
+from .qwen_expert_1bit import apply_one_bit_expert, expert_from_batched, quantize_qwen_expert
 from .io_metrics import request_rows
 from .manifest import InstalledModel, NGram
 # Kept as module-level names for existing callers and checkpoint-contract tests.
@@ -802,9 +803,14 @@ class StreamingExperts(nn.Module):
         self.wave_count = 0
         self.wave_pairs = 0
         self.wave_peak_experts = 0
+        # Opt-in: resident experts are affine 1-bit. The installed blobs stay MXFP4.
+        self.one_bit = False
 
-    @staticmethod
-    def _one(value: mx.array, weights: QwenExpertWeights) -> mx.array:
+    def _one(self, value: mx.array, weights) -> mx.array:
+        if self.one_bit:
+            if isinstance(weights, QwenExpertWeights):
+                weights = quantize_qwen_expert(weights)
+            return apply_one_bit_expert(value, weights)
         projected = _qmm(value, weights.gate_up, weights.gate_up_scales)
         gate, up = mx.split(projected, 2, axis=-1)
         return _qmm(nn.silu(gate) * up, weights.down, weights.down_scales)
@@ -847,6 +853,8 @@ class StreamingExperts(nn.Module):
         if self.wave_slots and value.size // value.shape[-1] > 1:
             return self._waves(value, np.asarray(indices, dtype=np.int32))
         batched = self.cache.current_batched(self.layer)
+        if isinstance(batched, QwenBatchedExperts) and self.one_bit:
+            return self._batched_one_bit(value, indices, batched)
         if isinstance(batched, QwenBatchedExperts):
             capture = getattr(self.cache, "capture_prefill_seed_routes", None)
             if capture is not None:
@@ -894,6 +902,33 @@ class StreamingExperts(nn.Module):
         if record_sync is not None:
             record_sync(time.perf_counter() - sync_started)
         return self._routed(value, selected)
+
+    def _batched_one_bit(self, value: mx.array, indices: mx.array, batched: QwenBatchedExperts) -> mx.array:
+        """Same grouping as routed experts, quantized from the MXFP4 layer buffer.
+
+        ``gather_qmm`` only reads MXFP4. The layer buffer stays the installed
+        blob so prefill can still seed decode slots from it.
+        """
+        capture = getattr(self.cache, "capture_prefill_seed_routes", None)
+        if capture is not None:
+            capture(self.layer, indices)
+        if getattr(self.cache, "route_cache_enabled", False):
+            self.cache.observe_batched_routes(self.layer, np.asarray(indices, dtype=np.int32))
+        selected = np.asarray(indices, dtype=np.int32)
+        flat = selected.reshape(-1)
+        order = np.argsort(flat, kind="stable")
+        boundaries = np.flatnonzero(np.diff(flat[order])) + 1
+        flat_value = value.reshape(-1, value.shape[-1])
+        outputs = []
+        for positions in np.split(order, boundaries):
+            if positions.size == 0:
+                continue
+            expert = int(flat[positions[0]])
+            source = mx.take(flat_value, mx.array(positions // selected.shape[-1]), axis=0)
+            outputs.append(self._one(source, expert_from_batched(batched, expert)))
+        grouped = mx.concatenate(outputs, axis=0)
+        restored = mx.take(grouped, mx.array(np.argsort(order)), axis=0)
+        return restored.reshape(*selected.shape, -1)
 
     def _routed(self, value: mx.array, selected: np.ndarray) -> mx.array:
         """Consume already materialized routes without a second GPU-to-host wait."""
@@ -1836,6 +1871,7 @@ def load(
         eviction_policy=getattr(config, "expert_eviction_policy", "lfu"),
         prefill_read_experts=getattr(config, "qwen_prefill_read_experts", 1),
         prefill_seed_experts=getattr(config, "qwen_prefill_seed_experts", 0),
+        one_bit_experts=getattr(config, "qwen_1bit_experts", False) is True,
     )
     ngram_store = None
     try:
@@ -1867,10 +1903,12 @@ def load(
         # Grouping only reorders gather_qmm rows; MTP receives identical hidden states.
         grouped_prefill = bool(getattr(config, "qwen_grouped_experts", True))
         sorted_prefill = grouped_prefill and getattr(config, "qwen_sorted_expert_prefill", False) is True
+        one_bit = getattr(config, "qwen_1bit_experts", False) is True
         for layer in model.model.layers:
             layer.mlp.experts.grouped_prefill = grouped_prefill
             layer.mlp.experts.sorted_prefill = sorted_prefill
             layer.mlp.experts.ready_verification = True
+            layer.mlp.experts.one_bit = one_bit
             layer.mlp.experts.wave_slots = getattr(config, "qwen_expert_wave_slots", 0)
             attention = getattr(layer, "self_attn", None)
             if isinstance(attention, QSAAttention):

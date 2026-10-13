@@ -2025,7 +2025,10 @@ struct ModelAdvancedView: View {
           if modelKind.usesQwenEngine {
             Divider()
             toggleField(QwenFlashCopy.commonTensors, hint: QwenFlashCopy.commonTensorsHint,
-              value: optionalToggle(\.qwen8BitCommonTensors, defaultValue: true))
+              value: qwen8BitResidentWeights)
+            Divider()
+            toggleField(QwenFlashCopy.oneBitExperts, hint: QwenFlashCopy.oneBitExpertsHint,
+              value: qwen1BitExperts)
           }
           if modelKind.descriptor.editableSettings.contains("kvCachePrecision") {
             Divider()
@@ -2290,6 +2293,20 @@ struct ModelAdvancedView: View {
 
   private var moePrefillStepSize: Binding<Int> {
     Binding(get: { settings.moePrefillStepSize ?? 0 }, set: { settings.moePrefillStepSize = $0 })
+  }
+
+  private var qwen8BitResidentWeights: Binding<Bool> {
+    Binding(
+      get: { settings.qwen8BitCommonTensors ?? true },
+      set: { settings.qwen8BitCommonTensors = $0 }
+    )
+  }
+
+  private var qwen1BitExperts: Binding<Bool> {
+    Binding(
+      get: { settings.qwen1BitExperts ?? false },
+      set: { settings.qwen1BitExperts = $0 }
+    )
   }
 
   private func optionalToggle(_ keyPath: WritableKeyPath<ModelAdvancedSettings, Bool?>,

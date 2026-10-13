@@ -51,7 +51,11 @@ prefill, masked QSA prefill and the selected-block QSA kernel on. Prompt chunks 
 the selected-block kernel, which reads only the key blocks QSA selected. Shorter
 calls, including Decode and MTP verification, use the gathered QSA path. New or
 reset Qwen settings also turn on 8-bit resident weights and split each whole-layer
-Prefill read into 8 jobs; saved settings keep their values.
+Prefill read into 8 jobs; saved settings keep their values. **Use 1-bit expert
+weights** is off unless the user turns it on. After a routed expert is read into
+memory, that copy is stored as affine 1-bit groups of 64. Installed expert files
+stay MXFP4. Common tensors are unchanged. Prompt caches for MXFP4 and 1-bit
+experts stay separate.
 
 Both Qwen model kinds accept still images through App Chat and the Chat/Responses
 APIs. Each installation includes its own pinned `vision/common.bin` (897,864,704

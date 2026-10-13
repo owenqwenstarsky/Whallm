@@ -258,6 +258,33 @@ class FlashConfigTests(unittest.TestCase):
         settings.validate_flash_config(SimpleNamespace(qwen_expert_wave_slots=512,
             qwen_ngram_io="pread", qwen_ngram_cache_bytes=512 * 1024**2))
 
+    def test_one_bit_experts_are_off_and_leave_other_weights_alone(self):
+        self.assertIs(settings.DEFAULTS["qwen_1bit_experts"], False)
+        self.assertNotIn("qwen_1bit_common_tensors", settings.DEFAULTS)
+        parser = argparse.ArgumentParser()
+        settings.add_flash_arguments(parser)
+        self.assertIs(settings.flash_arguments(parser.parse_args([]))["qwen_1bit_experts"], False)
+        enabled = settings.flash_arguments(parser.parse_args(["--qwen-1bit-experts"]))
+        self.assertIs(enabled["qwen_1bit_experts"], True)
+        self.assertIs(enabled["qwen_8bit_common_tensors"], False)
+        settings.validate_flash_config(SimpleNamespace(**{
+            **settings.DEFAULTS, "qwen_1bit_experts": True, "qwen_8bit_common_tensors": True}))
+        settings.validate_flash_config(SimpleNamespace(**{
+            **settings.DEFAULTS, "qwen_1bit_experts": True, "ane_prefill": True, "ane_prefill_ratio": 0.5}))
+        for changes in (
+            {"qwen_1bit_experts": 1},
+            {"qwen_1bit_experts": True, "staged_expert_streaming": True},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                settings.validate_flash_config(SimpleNamespace(**{**settings.DEFAULTS, **changes}))
+
+    def test_one_bit_expert_storage_is_six_seventeenths_of_mxfp4(self):
+        # group 64 affine 1-bit versus group 32 MXFP4, for any column multiple of 64.
+        for rows, cols in ((8, 64), (1280, 2560), (2560, 640)):
+            mxfp4 = rows * cols // 2 + rows * cols // 32
+            one_bit = rows * cols // 8 + rows * (cols // 64) * 4
+            self.assertEqual(one_bit * 17, mxfp4 * 6)
+
 
 if __name__ == "__main__":
     unittest.main()

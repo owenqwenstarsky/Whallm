@@ -271,6 +271,8 @@
 "Customize MTP strategy" = "自定义 MTP 策略";
 "Use 8-bit resident weights" = "使用 8-bit 常驻权重";
 "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change." = "将常驻内存的模型权重（专家除外）由 BF16 改为 8-bit 存储。可减少内存用量并加快生成速度，开启 MTP 时最明显。生成的文字可能改变。";
+"Use 1-bit expert weights" = "使用 1-bit 专家权重";
+"Quantizes routed expert weights after they are read into memory and keeps that copy. Installed expert files stay unchanged. Uses less memory for loaded experts. Generated text may change, and output can be slower." = "读取到内存后，将路由专家权重量化为 1-bit 并只保留这份副本。已安装的专家文件保持不变。已加载的专家更省内存。生成的文字可能改变，输出也可能变慢。";
 "Reuses completed attention-index blocks instead of recalculating them. Retains extra index data." = "重用已完成块的注意力索引，避免重复计算；会保留额外索引数据。";
 "Reads repeated N-gram rows once per lookup and uses a decoding table." = "每次查找只读取一次重复的 N-gram 数据行，并通过查表解码。";
 "Reuses a compiled normalization calculation, not the whole generation graph." = "重用已编译的归一化计算；不是重用整个生成流程。";

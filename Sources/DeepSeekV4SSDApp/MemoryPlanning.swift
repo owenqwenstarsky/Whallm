@@ -248,22 +248,31 @@ struct MemoryPlanningProfile {
       auxiliaryExperts = budget
       auxiliaryState = Double(descriptor.layerCount) * window * dim * (v41 ? 4 : 2 * activationBytes)
     }
-    // "Use 8-bit resident weights" repacks after loading, so loading still holds BF16.
-    // Each repacked weight keeps 8-bit values plus BF16 scales and biases per 64: 17/32 of BF16.
+    // Resident-weight repacking happens after loading, so loading still holds BF16.
+    // 8-bit keeps values plus BF16 scales and biases per 64: 17/32 of BF16.
+    // 8-bit restores a whole weight only for products of more than 16 rows.
+    // 1-bit experts replace the retained MXFP4 slot after the read. Any MXFP4
+    // matrix becomes 6/17 of its blob (1-bit group 64 versus MXFP4 group 32).
+    // Whole-layer prefill still stages the installed blobs. Each product restores
+    // one matrix; gate_up is the larger one (2 * intermediate * hidden, BF16).
     let repacked = qwen && s.qwen8BitCommonTensors == true
-    func repackedBytes(_ tensors: [InstalledTensor]?) -> [(name: String, bytes: Double)] {
+    let droppedShare = 15.0
+    let oneBitExperts = qwen && s.qwen1BitExperts == true
+    func repackedBytes(_ tensors: [InstalledTensor]?) -> [(name: String, bytes: Double, columns: Double)] {
       guard repacked else { return [] }
       // The runtime's rule: BF16 projections with at least 256 output rows, except routers.
       return (tensors ?? []).filter {
         $0.dtype == "BF16" && $0.shape.count == 2 && $0.shape[0] >= 256 && $0.name.hasSuffix(".weight")
           && !$0.name.hasSuffix("mlp.gate.weight") && !$0.name.hasSuffix("embed_tokens.weight")
-      }.map { ($0.name, Double($0.length)) }
+      }.map { ($0.name, Double($0.length), Double($0.shape[1])) }
     }
     let repackedMain = repackedBytes(manifest.commonTensors)
     let repackedMTP = repackedBytes(mtp ? manifest.mtp?.commonTensors : nil)
-    let residentWeights = weights - repackedMain.reduce(0) { $0 + $1.bytes } * 15 / 32
-    let auxiliary = auxiliaryWeights - repackedMTP.reduce(0) { $0 + $1.bytes } * 15 / 32
-      + auxiliaryExperts + auxiliaryState
+    let residentWeights = weights - repackedMain.reduce(0) { $0 + $1.bytes } * droppedShare / 32
+    let retainedExpert = oneBitExperts ? expert * 6 / 17 : expert
+    let retainedAuxiliaryExperts = oneBitExperts ? auxiliaryExperts * 6 / 17 : auxiliaryExperts
+    let auxiliary = auxiliaryWeights - repackedMTP.reduce(0) { $0 + $1.bytes } * droppedShare / 32
+      + retainedAuxiliaryExperts + auxiliaryState
     // V4.1 DSpark retains one target + draft snapshot per request; Qwen MTP keeps
     // target + draft cache + boundary hidden. The App still disables V4 DSpark reuse.
     let promptCacheEnabled = s.promptCacheMode != .off && (!dspark || v41)
@@ -287,9 +296,11 @@ struct MemoryPlanningProfile {
     let reads = Double(blob) * Double(s.readWorkers + (s.prefetchReadWorkers ?? 2)) + extraStaging
     // V4 pipelines the next expert layer itself; Qwen/V4.1 expose this as a switch.
     let layerCopies = kind == .deepSeekV4 || s.nextLayerPrefetch == true ? 2.0 : 1.0
-    let seeded = qwen && batched
+    let seededMXFP4 = qwen && batched
       ? min(expert, Double(blob) * Double(manifest.layerCount) * Double(s.qwenPrefillSeedExperts ?? 0)) : 0
-    let prefillExperts = batched ? Double(blob) * Double(manifest.expertCount) * layerCopies + seeded : expert
+    let seeded = oneBitExperts ? seededMXFP4 * 6 / 17 : seededMXFP4
+    let prefillExperts = batched
+      ? Double(blob) * Double(manifest.expertCount) * layerCopies + seeded : retainedExpert
 
     func attentionWork(_ queries: Double) -> Double {
       if qwen {
@@ -318,11 +329,16 @@ struct MemoryPlanningProfile {
       ? Double(input) * hidden * Double(manifest.dspark?.targetLayerIDs.count ?? 3) * 4 * 2 : 0
     let promptHidden = (layerMajor ? Double(input) * hidden * hc * activationBytes * hiddenCopies : 0) + capturedHidden
     let logits = layerMajor ? 0 : step * vocab * (v41 ? 4 : activationBytes)
-    // Products of more than 16 rows multiply by a temporary BF16 copy of one repacked weight.
-    // lm_head sees that many rows only when chunked prefill computes logits for a whole step.
-    let restoredWeight = step <= 16 ? 0 : (repackedMain + repackedMTP)
-      .filter { !layerMajor || $0.name != "lm_head.weight" }.map(\.bytes).max() ?? 0
-    let prefillWork = max(attentionWork(step), moeWork(moeStep), logits) + cache.growth + restoredWeight
+    // 8-bit products of more than 16 rows copy one whole weight back to BF16.
+    // lm_head runs on a whole prefill step only when prefill is not layer-major.
+    func restoredBytes(_ items: [(name: String, bytes: Double, columns: Double)]) -> Double {
+      items.map { $0.bytes }.max() ?? 0
+    }
+    let prefillWeights = (repackedMain + repackedMTP)
+      .filter { !layerMajor || $0.name != "lm_head.weight" }
+    let restoredWeight = step > 16 ? restoredBytes(prefillWeights) : 0
+    let restoredExpert = oneBitExperts ? 4 * intermediate * hidden : 0
+    let prefillWork = max(attentionWork(step), moeWork(moeStep), logits) + cache.growth + restoredWeight + restoredExpert
     // Each layer-major chunk retains one SharedState. Its arrays use that
     // chunk's visible history, not the final cache's reserved capacity.
     var sharedIndices = 0.0
@@ -355,7 +371,7 @@ struct MemoryPlanningProfile {
     let decodeQueries = mtp ? 6.0 : dspark ? Double(manifest.dspark?.blockSize ?? 5) : 1.0
     // Verification forks main state only in speculative generation, not all phases.
     let verification = mtp || dspark ? cache.bytes : 0
-    let decodeWork = max(attentionWork(decodeQueries), moeWork(decodeQueries), decodeQueries * vocab * 4) + cache.growth
+    let decodeWork = max(attentionWork(decodeQueries), moeWork(decodeQueries), decodeQueries * vocab * 4) + cache.growth + restoredExpert
     // Ordinary chunked prefill holds two in-flight checkpoints until generation
     // completes, before retention/eviction runs. Budget them separately from old
     // retained requests, including a short-suffix hit with layer-major enabled.
@@ -369,7 +385,7 @@ struct MemoryPlanningProfile {
       auxiliary: auxiliary, temporary: promptHidden + sharedIndices + prefillWork + checkpoint + reads + ane + allocator + ngramCache)
     // Qwen MTP retains prefilled_hidden through its generation iterator.
     let retainedHidden = mtp && layerMajor ? Double(input) * hidden * hc * activationBytes : 0
-    let decoding = MemoryStageEstimate(model: residentWeights + expert, conversation: conversation,
+    let decoding = MemoryStageEstimate(model: residentWeights + retainedExpert, conversation: conversation,
       auxiliary: auxiliary + verification, temporary: decodeWork + retainedHidden + checkpoint + reads + ane + allocator + ngramCache)
     let result = MemoryEstimate(loading: loading, prefill: prefill, decoding: decoding,
       inputTokens: input, outputTokens: output)
