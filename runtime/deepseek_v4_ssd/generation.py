@@ -243,9 +243,11 @@ def _qwen_common_tensor_contract(config) -> dict:
 
 
 def _qwen_expert_weight_contract(config) -> dict:
-    """Separate prompt caches when resident experts are affine 1-bit."""
-    if getattr(config, "qwen_1bit_experts", False):
-        return {"qwenExpertWeights": "affine1-group64-v1"}
+    """Separate prompt caches for each affine 2-bit expert share."""
+    from .qwen_flash_config import resident_two_bit
+    active, percent = resident_two_bit(config)
+    if active:
+        return {"qwenExpertWeights": f"affine2-group64-p{percent}-v1"}
     return {}
 
 

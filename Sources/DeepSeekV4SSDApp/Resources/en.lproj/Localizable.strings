@@ -271,8 +271,11 @@
 "Customize MTP strategy" = "Customize MTP strategy";
 "Use 8-bit resident weights" = "Use 8-bit resident weights";
 "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change." = "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change.";
-"Use 1-bit expert weights" = "Use 1-bit expert weights";
-"Quantizes routed expert weights after they are read into memory and keeps that copy. Installed expert files stay unchanged. Uses less memory for loaded experts. Generated text may change, and output can be slower." = "Quantizes routed expert weights after they are read into memory and keeps that copy. Installed expert files stay unchanged. Uses less memory for loaded experts. Generated text may change, and output can be slower.";
+"Use 2-bit expert weights" = "Use 2-bit expert weights";
+"After a routed expert is read into memory, stores the chosen share of that copy in 2 bits and keeps the rest in its original format. Installed expert files stay unchanged. A larger share uses less memory for loaded experts. Generated text may change, and output can be slower." = "After a routed expert is read into memory, stores the chosen share of that copy in 2 bits and keeps the rest in its original format. Installed expert files stay unchanged. A larger share uses less memory for loaded experts. Generated text may change, and output can be slower.";
+"Expert weights in 2 bits" = "Expert weights in 2 bits";
+"Percentage of each loaded expert stored in 2 bits, in groups of 64 input columns from the first column. The default is 50%. 0% keeps the original weights. 100% stores the whole expert in 2 bits." = "Percentage of each loaded expert stored in 2 bits, in groups of 64 input columns from the first column. The default is 50%. 0% keeps the original weights. 100% stores the whole expert in 2 bits.";
+"2-bit expert share must be an integer from 0 to 100." = "2-bit expert share must be an integer from 0 to 100.";
 "Reuses completed attention-index blocks instead of recalculating them. Retains extra index data." = "Reuses completed attention-index blocks instead of recalculating them. Retains extra index data.";
 "Reads repeated N-gram rows once per lookup and uses a decoding table." = "Reads repeated N-gram rows once per lookup and uses a decoding table.";
 "Reuses a compiled normalization calculation, not the whole generation graph." = "Reuses a compiled normalization calculation, not the whole generation graph.";

@@ -2027,8 +2027,12 @@ struct ModelAdvancedView: View {
             toggleField(QwenFlashCopy.commonTensors, hint: QwenFlashCopy.commonTensorsHint,
               value: qwen8BitResidentWeights)
             Divider()
-            toggleField(QwenFlashCopy.oneBitExperts, hint: QwenFlashCopy.oneBitExpertsHint,
-              value: qwen1BitExperts)
+            toggleField(QwenFlashCopy.twoBitExperts, hint: QwenFlashCopy.twoBitExpertsHint,
+              value: qwen2BitExperts)
+            if qwen2BitExperts.wrappedValue {
+              Divider()
+              twoBitExpertShare
+            }
           }
           if modelKind.descriptor.editableSettings.contains("kvCachePrecision") {
             Divider()
@@ -2302,11 +2306,38 @@ struct ModelAdvancedView: View {
     )
   }
 
-  private var qwen1BitExperts: Binding<Bool> {
+  private var qwen2BitExperts: Binding<Bool> {
     Binding(
-      get: { settings.qwen1BitExperts ?? false },
-      set: { settings.qwen1BitExperts = $0 }
+      get: { settings.qwen2BitExperts ?? false },
+      set: { enabled in
+        settings.qwen2BitExperts = enabled
+        if enabled, settings.qwen2BitExpertPercent == nil {
+          settings.qwen2BitExpertPercent = 50
+        }
+      }
     )
+  }
+
+  private var twoBitExpertShare: some View {
+    let percent = min(100, max(0, settings.qwen2BitExpertPercent ?? 50))
+    let percentText = String(format: "%d%%", locale: language.locale, percent)
+    VStack(alignment: .leading, spacing: 8) {
+      HStack(alignment: .firstTextBaseline) {
+        SettingLabel(QwenFlashCopy.twoBitShare, hint: QwenFlashCopy.twoBitShareHint, language: language)
+        Spacer()
+        Text(percentText)
+          .font(.body.weight(.semibold).monospacedDigit())
+          .fixedSize()
+      }
+      CacheBudgetSlider(value: Binding(
+        get: { Double(percent) },
+        set: { settings.qwen2BitExpertPercent = Int($0.rounded()) }
+      ), range: 0...100, step: 1)
+      .accessibilityLabel(L10n.string(QwenFlashCopy.twoBitShare, language: language))
+      .accessibilityValue(percentText)
+      .accessibilityIdentifier("qwen-2bit-expert-percent")
+    }
+    .padding(.vertical, 8)
   }
 
   private func optionalToggle(_ keyPath: WritableKeyPath<ModelAdvancedSettings, Bool?>,

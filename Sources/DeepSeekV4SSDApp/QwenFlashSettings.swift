@@ -40,6 +40,9 @@ extension ModelAdvancedSettings {
     guard (0...512).contains(qwenNgramCacheMiB ?? 0) else {
       throw ConfigurationError(L10n.string(QwenFlashCopy.invalidCache))
     }
+    guard (0...100).contains(qwen2BitExpertPercent ?? 50) else {
+      throw ConfigurationError(L10n.string(QwenFlashCopy.invalidTwoBitShare))
+    }
   }
 }
 
@@ -54,9 +57,12 @@ enum QwenFlashCopy {
   static let invalidSeeds = "Warm decode experts per layer must be an integer from 0 to 128."
   static let commonTensors = "Use 8-bit resident weights"
   static let commonTensorsHint = "Stores the model weights that stay in memory, except experts, in 8 bits instead of BF16. Uses less memory and speeds up generation, especially with MTP. Generated text may change."
-  static let oneBitExperts = "Use 1-bit expert weights"
-  static let oneBitExpertsHint = "Quantizes routed expert weights after they are read into memory and keeps that copy. Installed expert files stay unchanged. Uses less memory for loaded experts. Generated text may change, and output can be slower."
+  static let twoBitExperts = "Use 2-bit expert weights"
+  static let twoBitExpertsHint = "After a routed expert is read into memory, stores the chosen share of that copy in 2 bits and keeps the rest in its original format. Installed expert files stay unchanged. A larger share uses less memory for loaded experts. Generated text may change, and output can be slower."
+  static let twoBitShare = "Expert weights in 2 bits"
+  static let twoBitShareHint = "Percentage of each loaded expert stored in 2 bits, in groups of 64 input columns from the first column. The default is 50%. 0% keeps the original weights. 100% stores the whole expert in 2 bits."
+  static let invalidTwoBitShare = "2-bit expert share must be an integer from 0 to 100."
   static let allKeys = [wavesConflict, invalidWaves, invalidBackend, invalidCache,
     invalidQueryChunk, invalidReadBatch, invalidSeeds, commonTensors, commonTensorsHint,
-    oneBitExperts, oneBitExpertsHint]
+    twoBitExperts, twoBitExpertsHint, twoBitShare, twoBitShareHint, invalidTwoBitShare]
 }

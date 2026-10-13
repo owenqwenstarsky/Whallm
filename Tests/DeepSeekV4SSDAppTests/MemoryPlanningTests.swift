@@ -671,7 +671,7 @@ final class MemoryPlanningTests: XCTestCase {
     XCTAssertEqual(on.loading.total, off.loading.total)
   }
 
-  func test1BitExpertWeightsKeepSixSeventeenthsAndRestoreOneMatrix() throws {
+  func test2BitExpertWeightsScaleWithTheConfiguredShare() throws {
     let p = try profile()
     var s = ModelAdvancedSettings.defaults(for: .qwen3_8FlashNext)
     s.qwen8BitCommonTensors = false
@@ -680,28 +680,34 @@ final class MemoryPlanningTests: XCTestCase {
     s.batchedExpertPrefill = true
     s.qwenPrefillSeedExperts = 0
     s.expertCacheGiB = ExpertMemory.exactGiB(slots: 100, blobBytes: 2_611_200)
-    func estimate(_ on: Bool) throws -> MemoryEstimate {
-      s.qwen1BitExperts = on
+    func estimate(_ on: Bool, percent: Int = 50) throws -> MemoryEstimate {
+      s.qwen2BitExperts = on
+      s.qwen2BitExpertPercent = percent
       return try XCTUnwrap(p.estimate(s, mtpAvailable: true, dsparkAvailable: false))
     }
-    let saved = Double(100 * 2_611_200) * 11 / 17
-    let restored = 4.0 * 640 * 2_560
-    let off = try estimate(false), on = try estimate(true)
-    XCTAssertEqual(off.decoding.model - on.decoding.model, saved, accuracy: 1)
-    XCTAssertEqual(on.prefill.model, off.prefill.model, accuracy: 1)
-    XCTAssertEqual(on.loading.total, off.loading.total)
-    XCTAssertEqual(on.prefill.temporary - off.prefill.temporary, restored, accuracy: 1)
-    XCTAssertEqual(on.decoding.temporary - off.decoding.temporary, restored, accuracy: 1)
+    let slots = Double(100 * 2_611_200)
+    let off = try estimate(false)
+    let half = try estimate(true, percent: 50)
+    let full = try estimate(true, percent: 100)
+    let none = try estimate(true, percent: 0)
+    XCTAssertEqual(off.decoding.model - half.decoding.model, slots * 7 / 34, accuracy: 1)
+    XCTAssertEqual(off.decoding.model - full.decoding.model, slots * 7 / 17, accuracy: 1)
+    XCTAssertEqual(none.decoding.model, off.decoding.model, accuracy: 1)
+    XCTAssertEqual(half.prefill.model, off.prefill.model, accuracy: 1)
+    XCTAssertEqual(half.loading.total, off.loading.total)
+    XCTAssertEqual(half.prefill.temporary - off.prefill.temporary, 0.5 * 4 * 640 * 2_560, accuracy: 1)
+    XCTAssertEqual(full.decoding.temporary - off.decoding.temporary, 4 * 640 * 2_560, accuracy: 1)
+    XCTAssertEqual(none.prefill.temporary, off.prefill.temporary, accuracy: 1)
     s.batchedExpertPrefill = false
-    let offSlots = try estimate(false), onSlots = try estimate(true)
-    XCTAssertEqual(offSlots.prefill.model - onSlots.prefill.model, saved, accuracy: 1)
+    let offSlots = try estimate(false), halfSlots = try estimate(true, percent: 50)
+    XCTAssertEqual(offSlots.prefill.model - halfSlots.prefill.model, slots * 7 / 34, accuracy: 1)
     s.batchedExpertPrefill = true
     s.mtpEnabled = true
     s.mtpCacheGiB = ExpertMemory.exactGiB(slots: 20, blobBytes: 2_611_200)
-    let offMTP = try estimate(false), onMTP = try estimate(true)
-    XCTAssertEqual(offMTP.decoding.auxiliary - onMTP.decoding.auxiliary,
-      Double(20 * 2_611_200) * 11 / 17, accuracy: 1)
-    XCTAssertEqual(onMTP.loading.total, offMTP.loading.total)
+    let offMTP = try estimate(false), halfMTP = try estimate(true, percent: 50)
+    XCTAssertEqual(offMTP.decoding.auxiliary - halfMTP.decoding.auxiliary,
+      Double(20 * 2_611_200) * 7 / 34, accuracy: 1)
+    XCTAssertEqual(halfMTP.loading.total, offMTP.loading.total)
   }
 
   private func profile(common: [InstalledTensor] = [], mtp: [InstalledTensor] = []) throws -> MemoryPlanningProfile {
